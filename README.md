@@ -1,5 +1,7 @@
 # Boda Dispatch
 
+[![CI](https://github.com/iochieng1/boda-dispatch/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/iochieng1/boda-dispatch/actions/workflows/ci.yml)
+
 **A real-time delivery dispatch board where dispatchers and boda riders share one live view of every job, even when a rider's connection drops.**
 
 > 🚧 Work in progress. Day 1: monorepo scaffold, database schema, health checks, Socket.IO, CI.
