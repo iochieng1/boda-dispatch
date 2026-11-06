@@ -1,0 +1,38 @@
+{
+  "name": "boda-dispatch",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Real-time delivery dispatch board for boda/parcel riders in Kenya.",
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "workspaces": [
+    "packages/shared",
+    "apps/server",
+    "apps/web"
+  ],
+  "scripts": {
+    "dev:server": "npm run dev -w @boda-dispatch/server",
+    "dev:web": "npm run dev -w @boda-dispatch/web",
+    "build:shared": "npm run build -w @boda-dispatch/shared",
+    "build": "npm run build --workspaces",
+    "typecheck": "npm run build:shared && npm run typecheck --workspaces",
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test": "npm run build:shared && npm run test --workspaces --if-present",
+    "db:generate": "npm run build:shared && npm run db:generate -w @boda-dispatch/server",
+    "db:migrate": "npm run db:migrate -w @boda-dispatch/server"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^26.6.6",
+    "eslint": "^10.14.0",
+    "globals": "^17.14.0",
+    "prettier": "^3.9.10",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.72.1",
+    "vitest": "^5.1.0"
+  }
+}

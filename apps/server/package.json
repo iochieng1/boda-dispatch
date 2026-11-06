@@ -1,0 +1,37 @@
+{
+  "name": "@boda-dispatch/server",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Fastify + Socket.IO API for the dispatch board.",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch --env-file=.env src/server.ts",
+    "build": "tsc -p tsconfig.build.json",
+    "start": "node dist/db/migrate.js && node dist/server.js",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "tsx --env-file=.env src/db/migrate.ts",
+    "db:studio": "drizzle-kit studio"
+  },
+  "dependencies": {
+    "@boda-dispatch/shared": "0.1.0",
+    "@socket.io/redis-adapter": "^8.3.0",
+    "drizzle-orm": "^0.45.4",
+    "fastify": "^5.12.8",
+    "ioredis": "^6.0.0",
+    "postgres": "^4.1.0",
+    "socket.io": "^4.8.4",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@testcontainers/postgresql": "^12.2.1",
+    "@testcontainers/redis": "^12.2.1",
+    "drizzle-kit": "^0.31.11",
+    "pino-pretty": "^13.2.0",
+    "socket.io-client": "^4.8.4",
+    "testcontainers": "^12.2.1",
+    "tsx": "^4.23.15"
+  }
+}

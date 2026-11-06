@@ -1,0 +1,11 @@
+node_modules
+**/node_modules
+**/dist
+**/.next
+coverage
+.env
+**/.env
+.git
+# The web app deploys to Vercel; only its manifest is needed so npm ci matches the lockfile.
+apps/web/*
+!apps/web/package.json
