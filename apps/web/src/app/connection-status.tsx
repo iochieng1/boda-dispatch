@@ -29,6 +29,10 @@ const RETRY_MS = 10_000;
 // Handshake refusals in a row before giving up (a fresh token that is still
 // refused, e.g. clock skew, would otherwise loop forever).
 const MAX_AUTH_RETRIES = 2;
+// auth:refresh pushes that get no ack are retried this often, this many
+// times: 5 x (5s timeout + 3s) fits inside the 60s refresh lead.
+const PUSH_RETRY_MS = 3_000;
+const MAX_PUSH_ATTEMPTS = 5;
 
 const styles: Record<Status, string> = {
   connecting: "bg-slate-400",
@@ -85,22 +89,37 @@ export function ConnectionStatus() {
       );
     };
 
-    // Each new access token (from our timer, or any other caller) is handed
-    // to the live socket: same socket id and rooms, no reconnect.
-    const unsubscribe = onSessionChange((session) => {
-      if (!session) return redirectToLogin();
-      scheduleRefresh(session.expiresAt);
-      if (!socket.connected) return;
+    let latestToken: string | null = null;
+
+    /** Hands a token to the live socket, retrying if the ack is lost. */
+    const pushToken = (token: string, attempt = 1) => {
+      if (stopped || !socket.connected || token !== latestToken) return;
       socket
         .timeout(5_000)
-        .emitWithAck("auth:refresh", { token: session.accessToken })
+        .emitWithAck("auth:refresh", { token })
         .then(
           (ack: SocketAuthRefreshAck) => {
             // Rejected: reconnect so the handshake checks the token afresh.
             if (!ack.ok) socket.disconnect().connect();
           },
-          () => undefined, // No ack in time: the next refresh will retry.
+          () => {
+            // No ack in time. The server still holds the old token, which
+            // expires within a minute, so retry now rather than at the next
+            // scheduled refresh ~14 minutes away.
+            if (attempt < MAX_PUSH_ATTEMPTS) {
+              setTimeout(() => pushToken(token, attempt + 1), PUSH_RETRY_MS);
+            }
+          },
         );
+    };
+
+    // Each new access token (from our timer, or any other caller) is handed
+    // to the live socket: same socket id and rooms, no reconnect.
+    const unsubscribe = onSessionChange((session) => {
+      if (!session) return redirectToLogin();
+      latestToken = session.accessToken;
+      scheduleRefresh(session.expiresAt);
+      pushToken(session.accessToken);
     });
 
     socket.on("connect", () => {
