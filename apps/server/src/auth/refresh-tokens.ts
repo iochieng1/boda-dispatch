@@ -1,0 +1,146 @@
+import { createHash, randomBytes, randomUUID } from "node:crypto";
+
+import { and, eq, isNull, lt, sql } from "drizzle-orm";
+
+import type { Database } from "../db/client.js";
+import { refreshTokens } from "../db/schema.js";
+
+export const REFRESH_TOKEN_TTL_SECONDS = 7 * 24 * 60 * 60;
+
+type Tx = Parameters<Parameters<Database["transaction"]>[0]>[0];
+type Executor = Database | Tx;
+
+export type RotateResult =
+  | { ok: true; dispatcherId: string; refreshToken: string }
+  | { ok: false; reason: "unknown" | "expired" | "revoked" | "reused" };
+
+/** Only the SHA-256 hash is stored, so a database leak can't be replayed. */
+export const hashRefreshToken = (token: string) =>
+  createHash("sha256").update(token).digest("hex");
+
+/**
+ * Serialises every rotation and revocation within one family. Without it, a
+ * family revocation running alongside a rotation could miss the token the
+ * rotation is inserting, and the newest token would survive.
+ */
+const lockFamily = (tx: Tx, familyId: string) =>
+  tx.execute(
+    sql`select pg_advisory_xact_lock(hashtextextended(${familyId}, 0))`,
+  );
+
+const revokeFamilyLocked = (tx: Tx, familyId: string) =>
+  tx
+    .update(refreshTokens)
+    .set({ revokedAt: sql`now()` })
+    .where(
+      and(
+        eq(refreshTokens.familyId, familyId),
+        isNull(refreshTokens.revokedAt),
+      ),
+    );
+
+const insertToken = async (
+  db: Executor,
+  dispatcherId: string,
+  familyId: string,
+) => {
+  // 256 bits of entropy: unguessable, so a fast hash (not argon2) is enough.
+  const token = randomBytes(32).toString("base64url");
+  await db.insert(refreshTokens).values({
+    dispatcherId,
+    familyId,
+    tokenHash: hashRefreshToken(token),
+    expiresAt: sql`now() + make_interval(secs => ${REFRESH_TOKEN_TTL_SECONDS})`,
+  });
+  return token;
+};
+
+/** Starts a new token family. Called on login. */
+export const issueRefreshToken = (db: Database, dispatcherId: string) =>
+  insertToken(db, dispatcherId, randomUUID());
+
+const findFamilyId = async (tx: Tx, tokenHash: string) => {
+  const [row] = await tx
+    .select({ familyId: refreshTokens.familyId })
+    .from(refreshTokens)
+    .where(eq(refreshTokens.tokenHash, tokenHash))
+    .limit(1);
+  return row?.familyId;
+};
+
+/**
+ * Consumes a refresh token and issues its successor in the same family.
+ * Presenting a token that was already used means it was copied: the whole
+ * family is revoked, including the newest token. The exception is a token
+ * used less than `graceSeconds` ago: the client most likely never received
+ * the successor, so it gets another one.
+ */
+export const rotateRefreshToken = (
+  db: Database,
+  token: string,
+  { graceSeconds }: { graceSeconds: number },
+): Promise<RotateResult> =>
+  db.transaction(async (tx) => {
+    const tokenHash = hashRefreshToken(token);
+    const familyId = await findFamilyId(tx, tokenHash);
+    if (!familyId) return { ok: false, reason: "unknown" };
+
+    await lockFamily(tx, familyId);
+
+    // Re-read under the lock: a concurrent request may have just used it.
+    const [row] = await tx
+      .select({
+        dispatcherId: refreshTokens.dispatcherId,
+        expired: sql<boolean>`${refreshTokens.expiresAt} <= now()`,
+        usedAt: refreshTokens.usedAt,
+        // clock_timestamp(), not now(): now() is when this transaction
+        // began, which can be before a concurrent refresh marked the token
+        // used, making a fresh reuse look like it happened "in the future".
+        usedWithinGrace: sql<boolean>`${graceSeconds} > 0 and ${refreshTokens.usedAt} > clock_timestamp() - make_interval(secs => ${graceSeconds})`,
+        revokedAt: refreshTokens.revokedAt,
+      })
+      .from(refreshTokens)
+      .where(eq(refreshTokens.tokenHash, tokenHash));
+
+    if (!row) return { ok: false, reason: "unknown" };
+    if (row.revokedAt) return { ok: false, reason: "revoked" };
+    if (row.expired) return { ok: false, reason: "expired" };
+    if (row.usedAt) {
+      if (row.usedWithinGrace) {
+        const refreshToken = await insertToken(tx, row.dispatcherId, familyId);
+        return { ok: true, dispatcherId: row.dispatcherId, refreshToken };
+      }
+      await revokeFamilyLocked(tx, familyId);
+      return { ok: false, reason: "reused" };
+    }
+
+    await tx
+      .update(refreshTokens)
+      .set({ usedAt: sql`now()` })
+      .where(eq(refreshTokens.tokenHash, tokenHash));
+
+    const refreshToken = await insertToken(tx, row.dispatcherId, familyId);
+    return { ok: true, dispatcherId: row.dispatcherId, refreshToken };
+  });
+
+/** Revokes the family the token belongs to. Unknown tokens are a no-op. */
+export const revokeRefreshTokenFamily = (db: Database, token: string) =>
+  db.transaction(async (tx) => {
+    const familyId = await findFamilyId(tx, hashRefreshToken(token));
+    if (!familyId) return;
+    await lockFamily(tx, familyId);
+    await revokeFamilyLocked(tx, familyId);
+  });
+
+/**
+ * Deletes tokens past their expiry. Only expired rows go: a used but
+ * unexpired row must stay, or presenting it again would look "unknown"
+ * instead of revoking its family. Returns the number deleted.
+ */
+export const purgeExpiredRefreshTokens = async (db: Database) => {
+  const deleted = await db
+    .delete(refreshTokens)
+    .where(lt(refreshTokens.expiresAt, sql`now()`))
+    .returning({ id: refreshTokens.id });
+  return deleted.length;
+};

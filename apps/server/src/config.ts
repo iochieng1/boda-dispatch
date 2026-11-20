@@ -11,6 +11,25 @@ const envSchema = z.object({
     .default("info"),
   DATABASE_URL: z.url(),
   REDIS_URL: z.url(),
+  // HS256 signing key for access tokens. 32+ characters so it can't be
+  // brute-forced; generate one with: openssl rand -base64 48
+  JWT_SECRET: z.string().min(32),
+  // A refresh token presented again within this many seconds of its first use
+  // is a lost response (page reload mid-refresh, flaky network), not theft:
+  // it is rotated again instead of revoking the session. 0 disables.
+  // Login attempts allowed per window, per client IP and per email. Checked
+  // before hashing, so guessing is throttled and argon2 can't be flooded.
+  LOGIN_MAX_ATTEMPTS_PER_IP: z.coerce.number().int().positive().default(20),
+  LOGIN_MAX_ATTEMPTS_PER_EMAIL: z.coerce.number().int().positive().default(10),
+  LOGIN_RATE_WINDOW_SECONDS: z.coerce.number().int().positive().default(900),
+  // Trust X-Forwarded-For for the client IP. Only enable behind a proxy that
+  // sets it (e.g. Render); otherwise clients could spoof their IP and dodge
+  // the per-IP login limit.
+  TRUST_PROXY: z
+    .enum(["true", "false"])
+    .default("false")
+    .transform((value) => value === "true"),
+  REFRESH_REUSE_GRACE_SECONDS: z.coerce.number().int().min(0).default(30),
   // Browser origins allowed to open a socket (the dispatcher dashboard).
   CORS_ORIGINS: z
     .string()
