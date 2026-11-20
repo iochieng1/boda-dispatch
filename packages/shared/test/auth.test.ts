@@ -30,6 +30,11 @@ describe("tokenPairSchema", () => {
       expires_in: 900,
       refresh_token: "r",
       refresh_expires_in: 604800,
+      dispatcher: {
+        id: "5f0c6a3e-8b1d-4c2a-9e7f-1a2b3c4d5e6f",
+        email: "jane@boda.example",
+        name: "Jane",
+      },
     };
     expect(tokenPairSchema.parse(pair)).toEqual(pair);
     expect(

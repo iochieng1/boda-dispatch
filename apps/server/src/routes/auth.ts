@@ -1,4 +1,5 @@
 import {
+  type DispatcherProfile,
   loginInputSchema,
   refreshInputSchema,
   type TokenPair,
@@ -7,7 +8,10 @@ import { sql } from "drizzle-orm";
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from "fastify";
 import type { z } from "zod";
 
-import { ACCESS_TOKEN_TTL_SECONDS } from "../auth/authenticate.js";
+import {
+  ACCESS_TOKEN_TTL_SECONDS,
+  findDispatcher,
+} from "../auth/authenticate.js";
 import { verifyAgainstDummyHash, verifyPassword } from "../auth/password.js";
 import {
   issueRefreshToken,
@@ -42,14 +46,15 @@ const unauthorized = (reply: FastifyReply, message: string) =>
 
 const authRoutes: FastifyPluginAsync = async (app) => {
   const tokenPair = (
-    dispatcherId: string,
+    dispatcher: DispatcherProfile,
     refreshToken: string,
   ): TokenPair => ({
-    access_token: app.jwt.sign({ sub: dispatcherId }),
+    access_token: app.jwt.sign({ sub: dispatcher.id }),
     token_type: "Bearer",
     expires_in: ACCESS_TOKEN_TTL_SECONDS,
     refresh_token: refreshToken,
     refresh_expires_in: REFRESH_TOKEN_TTL_SECONDS,
+    dispatcher,
   });
 
   app.post("/login", async (request, reply) => {
@@ -57,7 +62,12 @@ const authRoutes: FastifyPluginAsync = async (app) => {
     if (!body) return reply;
 
     const [dispatcher] = await app.db
-      .select({ id: dispatchers.id, passwordHash: dispatchers.passwordHash })
+      .select({
+        id: dispatchers.id,
+        email: dispatchers.email,
+        name: dispatchers.name,
+        passwordHash: dispatchers.passwordHash,
+      })
       .from(dispatchers)
       .where(sql`lower(${dispatchers.email}) = lower(${body.email})`)
       .limit(1);
@@ -72,7 +82,12 @@ const authRoutes: FastifyPluginAsync = async (app) => {
     }
 
     const refreshToken = await issueRefreshToken(app.db, dispatcher.id);
-    return reply.send(tokenPair(dispatcher.id, refreshToken));
+    const profile = {
+      id: dispatcher.id,
+      email: dispatcher.email,
+      name: dispatcher.name,
+    };
+    return reply.send(tokenPair(profile, refreshToken));
   });
 
   app.post("/refresh", async (request, reply) => {
@@ -89,7 +104,10 @@ const authRoutes: FastifyPluginAsync = async (app) => {
       return unauthorized(reply, "Invalid refresh token");
     }
 
-    return reply.send(tokenPair(result.dispatcherId, result.refreshToken));
+    // The FK cascades on delete, so a live token always has a dispatcher.
+    const dispatcher = await findDispatcher(app, result.dispatcherId);
+    if (!dispatcher) return unauthorized(reply, "Invalid refresh token");
+    return reply.send(tokenPair(dispatcher, result.refreshToken));
   });
 
   app.post("/logout", async (request, reply) => {

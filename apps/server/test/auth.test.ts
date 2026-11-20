@@ -71,6 +71,12 @@ describe("dispatcher auth", () => {
       expect(res.statusCode).toBe(200);
       const body = res.json();
       expect(body).toMatchObject({ token_type: "Bearer", expires_in: 900 });
+      expect(body.dispatcher).toEqual({
+        id: dispatcher.id,
+        email: dispatcher.email,
+        name: dispatcher.name,
+      });
+      expect(body.dispatcher).not.toHaveProperty("passwordHash");
       const claims = app.jwt.decode<{ sub: string; iat: number; exp: number }>(
         body.access_token,
       );
@@ -216,6 +222,7 @@ describe("dispatcher auth", () => {
       const body = res.json();
       expect(body).toMatchObject({ token_type: "Bearer", expires_in: 900 });
       expect(body.refresh_token).not.toBe(refresh_token);
+      expect(body.dispatcher.id).toBe(dispatcher.id);
       expect(app.jwt.decode<{ sub: string }>(body.access_token)?.sub).toBe(
         dispatcher.id,
       );

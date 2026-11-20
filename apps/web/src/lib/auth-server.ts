@@ -1,8 +1,4 @@
-import {
-  dispatcherProfileSchema,
-  type TokenPair,
-  tokenPairSchema,
-} from "@boda-dispatch/shared";
+import { type TokenPair, tokenPairSchema } from "@boda-dispatch/shared";
 import { NextResponse } from "next/server";
 
 import { REFRESH_COOKIE, type SessionPayload } from "./auth-shared";
@@ -25,18 +21,15 @@ export const callApi = (path: string, init: RequestInit = {}) =>
  * into an httpOnly cookie (never readable by page JS), the short-lived access
  * token and the dispatcher's profile go in the body.
  */
-export const sessionResponse = async (raw: unknown) => {
+export const sessionResponse = (raw: unknown) => {
+  // The pair carries the profile, so nothing can fail between the API
+  // rotating the refresh token and the new one reaching the cookie.
   const pair: TokenPair = tokenPairSchema.parse(raw);
-
-  const me = await callApi("/v1/auth/me", {
-    headers: { authorization: `Bearer ${pair.access_token}` },
-  });
-  if (!me.ok) throw new Error(`GET /v1/auth/me failed: ${me.status}`);
 
   const body: SessionPayload = {
     accessToken: pair.access_token,
     expiresIn: pair.expires_in,
-    dispatcher: dispatcherProfileSchema.parse(await me.json()),
+    dispatcher: pair.dispatcher,
   };
   const response = NextResponse.json(body, {
     headers: { "cache-control": "no-store" },

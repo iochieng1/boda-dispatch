@@ -13,6 +13,13 @@ export const refreshInputSchema = z
   .strict();
 export type RefreshInput = z.infer<typeof refreshInputSchema>;
 
+export const dispatcherProfileSchema = z.object({
+  id: z.uuid(),
+  email: z.string(),
+  name: z.string(),
+});
+export type DispatcherProfile = z.infer<typeof dispatcherProfileSchema>;
+
 export const tokenPairSchema = z.object({
   access_token: z.string().min(1),
   token_type: z.literal("Bearer"),
@@ -21,15 +28,10 @@ export const tokenPairSchema = z.object({
   refresh_token: z.string().min(1),
   /** Refresh token lifetime in seconds. */
   refresh_expires_in: z.number().int().positive(),
+  /** Who the tokens belong to, so clients need no extra request. */
+  dispatcher: dispatcherProfileSchema,
 });
 export type TokenPair = z.infer<typeof tokenPairSchema>;
-
-export const dispatcherProfileSchema = z.object({
-  id: z.uuid(),
-  email: z.string(),
-  name: z.string(),
-});
-export type DispatcherProfile = z.infer<typeof dispatcherProfileSchema>;
 
 /** Sent in the Socket.IO handshake (`auth`) and with `auth:refresh`. */
 export const socketAuthSchema = z.object({ token: z.string().min(1) });
