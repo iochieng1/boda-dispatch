@@ -93,7 +93,10 @@ export const rotateRefreshToken = (
         dispatcherId: refreshTokens.dispatcherId,
         expired: sql<boolean>`${refreshTokens.expiresAt} <= now()`,
         usedAt: refreshTokens.usedAt,
-        usedWithinGrace: sql<boolean>`${refreshTokens.usedAt} > now() - make_interval(secs => ${graceSeconds})`,
+        // clock_timestamp(), not now(): now() is when this transaction
+        // began, which can be before a concurrent refresh marked the token
+        // used, making a fresh reuse look like it happened "in the future".
+        usedWithinGrace: sql<boolean>`${graceSeconds} > 0 and ${refreshTokens.usedAt} > clock_timestamp() - make_interval(secs => ${graceSeconds})`,
         revokedAt: refreshTokens.revokedAt,
       })
       .from(refreshTokens)
