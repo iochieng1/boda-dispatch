@@ -230,6 +230,21 @@ describe("dispatcher auth", () => {
       });
     });
 
+    it("accepts the Bearer scheme in any letter case", async () => {
+      const dispatcher = await createDispatcher(app);
+      const { access_token } = await loginAs(app, dispatcher);
+
+      expect((await me(`bearer ${access_token}`)).statusCode).toBe(200);
+      expect((await me(`BEARER  ${access_token}`)).statusCode).toBe(200);
+    });
+
+    it("returns 401 for another auth scheme", async () => {
+      const dispatcher = await createDispatcher(app);
+      const { access_token } = await loginAs(app, dispatcher);
+
+      expect((await me(`Basic ${access_token}`)).statusCode).toBe(401);
+    });
+
     it("returns 401 without a token", async () => {
       expect((await me()).statusCode).toBe(401);
     });

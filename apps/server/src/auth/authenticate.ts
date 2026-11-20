@@ -77,8 +77,10 @@ export const authenticate = async (
   request: FastifyRequest,
   reply: FastifyReply,
 ) => {
-  const header = request.headers.authorization;
-  const token = header?.startsWith("Bearer ") ? header.slice(7) : undefined;
+  // Auth schemes are case-insensitive (RFC 7235): "bearer" is fine too.
+  const token = /^Bearer\s+(\S+)\s*$/i.exec(
+    request.headers.authorization ?? "",
+  )?.[1];
   const result = await verifyAccessToken(request.server, token);
 
   if (!result) {
