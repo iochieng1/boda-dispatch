@@ -94,7 +94,9 @@ const authRoutes: FastifyPluginAsync = async (app) => {
     const body = parseBody(refreshInputSchema, request, reply);
     if (!body) return reply;
 
-    const result = await rotateRefreshToken(app.db, body.refresh_token);
+    const result = await rotateRefreshToken(app.db, body.refresh_token, {
+      graceSeconds: app.config.REFRESH_REUSE_GRACE_SECONDS,
+    });
 
     if (!result.ok) {
       if (result.reason === "reused") {

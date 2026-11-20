@@ -15,6 +15,9 @@ export const testConfig = (overrides: Partial<Config> = {}): Config => ({
     DATABASE_URL: inject("databaseUrl"),
     REDIS_URL: inject("redisUrl"),
     JWT_SECRET: "test-jwt-secret-that-is-at-least-32-chars",
+    // Strict by default so reuse detection is tested directly; the grace
+    // window has its own tests.
+    REFRESH_REUSE_GRACE_SECONDS: "0",
   }),
   ...overrides,
 });

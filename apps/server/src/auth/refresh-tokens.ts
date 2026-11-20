@@ -71,11 +71,14 @@ const findFamilyId = async (tx: Tx, tokenHash: string) => {
 /**
  * Consumes a refresh token and issues its successor in the same family.
  * Presenting a token that was already used means it was copied: the whole
- * family is revoked, including the newest token.
+ * family is revoked, including the newest token. The exception is a token
+ * used less than `graceSeconds` ago: the client most likely never received
+ * the successor, so it gets another one.
  */
 export const rotateRefreshToken = (
   db: Database,
   token: string,
+  { graceSeconds }: { graceSeconds: number },
 ): Promise<RotateResult> =>
   db.transaction(async (tx) => {
     const tokenHash = hashRefreshToken(token);
@@ -90,6 +93,7 @@ export const rotateRefreshToken = (
         dispatcherId: refreshTokens.dispatcherId,
         expired: sql<boolean>`${refreshTokens.expiresAt} <= now()`,
         usedAt: refreshTokens.usedAt,
+        usedWithinGrace: sql<boolean>`${refreshTokens.usedAt} > now() - make_interval(secs => ${graceSeconds})`,
         revokedAt: refreshTokens.revokedAt,
       })
       .from(refreshTokens)
@@ -97,11 +101,15 @@ export const rotateRefreshToken = (
 
     if (!row) return { ok: false, reason: "unknown" };
     if (row.revokedAt) return { ok: false, reason: "revoked" };
+    if (row.expired) return { ok: false, reason: "expired" };
     if (row.usedAt) {
+      if (row.usedWithinGrace) {
+        const refreshToken = await insertToken(tx, row.dispatcherId, familyId);
+        return { ok: true, dispatcherId: row.dispatcherId, refreshToken };
+      }
       await revokeFamilyLocked(tx, familyId);
       return { ok: false, reason: "reused" };
     }
-    if (row.expired) return { ok: false, reason: "expired" };
 
     await tx
       .update(refreshTokens)

@@ -14,6 +14,10 @@ const envSchema = z.object({
   // HS256 signing key for access tokens. 32+ characters so it can't be
   // brute-forced; generate one with: openssl rand -base64 48
   JWT_SECRET: z.string().min(32),
+  // A refresh token presented again within this many seconds of its first use
+  // is a lost response (page reload mid-refresh, flaky network), not theft:
+  // it is rotated again instead of revoking the session. 0 disables.
+  REFRESH_REUSE_GRACE_SECONDS: z.coerce.number().int().min(0).default(30),
   // Browser origins allowed to open a socket (the dispatcher dashboard).
   CORS_ORIGINS: z
     .string()

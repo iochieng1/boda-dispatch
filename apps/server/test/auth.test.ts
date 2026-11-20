@@ -313,6 +313,67 @@ describe("dispatcher auth", () => {
     });
   });
 
+  describe("POST /v1/auth/refresh with a reuse grace window", () => {
+    let graceApp: App;
+
+    beforeAll(async () => {
+      graceApp = await buildTestApp({ REFRESH_REUSE_GRACE_SECONDS: 30 });
+    });
+
+    afterAll(async () => {
+      await graceApp.close();
+    });
+
+    const refreshOn = (refreshToken: string) =>
+      graceApp.inject({
+        method: "POST",
+        url: "/v1/auth/refresh",
+        payload: { refresh_token: refreshToken },
+      });
+
+    it("rotates again when a just-used token comes back (lost response)", async () => {
+      const dispatcher = await createDispatcher(graceApp);
+      const { refresh_token } = await loginAs(graceApp, dispatcher);
+      const lost = (await refreshOn(refresh_token)).json().refresh_token;
+
+      const retry = await refreshOn(refresh_token);
+
+      expect(retry.statusCode).toBe(200);
+      const next = retry.json().refresh_token;
+      expect(next).not.toBe(lost);
+      const { familyId } = await tokenRow(refresh_token);
+      const rows = await familyRows(familyId);
+      expect(rows.every((r) => r.revokedAt === null)).toBe(true);
+      expect((await refreshOn(next)).statusCode).toBe(200);
+    });
+
+    it("still revokes the family once the grace window has passed", async () => {
+      const dispatcher = await createDispatcher(graceApp);
+      const { refresh_token } = await loginAs(graceApp, dispatcher);
+      const second = (await refreshOn(refresh_token)).json().refresh_token;
+      await graceApp.db
+        .update(refreshTokens)
+        .set({ usedAt: new Date(Date.now() - 60_000) })
+        .where(eq(refreshTokens.tokenHash, hashRefreshToken(refresh_token)));
+
+      expect((await refreshOn(refresh_token)).statusCode).toBe(401);
+      expect((await refreshOn(second)).statusCode).toBe(401);
+    });
+
+    it("does not revive a revoked family", async () => {
+      const dispatcher = await createDispatcher(graceApp);
+      const { refresh_token } = await loginAs(graceApp, dispatcher);
+      await refreshOn(refresh_token);
+      await graceApp.inject({
+        method: "POST",
+        url: "/v1/auth/logout",
+        payload: { refresh_token },
+      });
+
+      expect((await refreshOn(refresh_token)).statusCode).toBe(401);
+    });
+  });
+
   describe("POST /v1/auth/logout", () => {
     it("revokes the family so its tokens can no longer refresh", async () => {
       const dispatcher = await createDispatcher(app);

@@ -16,6 +16,7 @@ describe("loadConfig", () => {
       PORT: 4000,
       HOST: "0.0.0.0",
       LOG_LEVEL: "info",
+      REFRESH_REUSE_GRACE_SECONDS: 30,
       CORS_ORIGINS: ["http://localhost:3000"],
     });
   });
