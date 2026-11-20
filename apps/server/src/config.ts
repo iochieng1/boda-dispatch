@@ -11,6 +11,9 @@ const envSchema = z.object({
     .default("info"),
   DATABASE_URL: z.url(),
   REDIS_URL: z.url(),
+  // HS256 signing key for access tokens. 32+ characters so it can't be
+  // brute-forced; generate one with: openssl rand -base64 48
+  JWT_SECRET: z.string().min(32),
   // Browser origins allowed to open a socket (the dispatcher dashboard).
   CORS_ORIGINS: z
     .string()

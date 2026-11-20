@@ -21,7 +21,7 @@ Dispatchers create delivery jobs and assign them to boda/parcel riders across Na
 - [x] Socket.IO on the Fastify HTTP server with the Redis adapter and typed events (`server:hello`)
 - [x] Dashboard page that shows live connection status (connected / reconnecting / disconnected)
 - [x] CI: lint, format, typecheck, migration drift check, integration tests on real Postgres/Redis, builds, secret scanning
-- [ ] Dispatcher auth
+- [x] Dispatcher auth: argon2id passwords, 15-minute access JWTs, rotating refresh tokens with reuse detection, authenticated sockets that refresh their token without reconnecting, Next.js login page and route guard
 - [ ] Job CRUD
 - [ ] Live job board via sockets
 - [ ] Optimistic concurrency: `409 Conflict` on a stale `version`, client rebases and retries
@@ -42,6 +42,8 @@ cp apps/web/.env.example apps/web/.env.local
 docker compose up -d     # Postgres + Redis
 npm run build:shared     # server and web import the compiled shared package
 npm run db:migrate
+# Create a dispatcher to log in with (prompts for the password)
+npm run dispatcher:create -w @boda-dispatch/server -- --email you@example.com --name "Your Name"
 npm run dev:server       # http://localhost:4000/health
 npm run dev:web          # http://localhost:3000
 ```
@@ -88,13 +90,15 @@ Decisions and the reasons for them. This section grows as features land.
 - **Socket.IO over raw WebSockets.** The board needs reconnection with backoff, rooms (per job, per rider), acknowledgements and a long-polling fallback for restrictive mobile networks. With raw `ws` we would rebuild all of that. The cost is a custom protocol, so clients must use a Socket.IO client, which is fine because we own every client.
 - **Redis adapter for horizontal scale.** With more than one server instance, a broadcast from instance A must reach sockets connected to instance B. `@socket.io/redis-adapter` relays broadcasts through Redis pub/sub. The same Redis will later back presence. Running several instances also needs sticky sessions for the long-polling transport (or websocket-only clients).
 - **PostgreSQL over MongoDB.** The core guarantees are relational: foreign keys from jobs to riders and dispatchers, check constraints (an assigned job must have a rider), a unique index for mutation dedupe, and conditional updates for optimistic concurrency, all inside transactions with the event log.
+- **Short-lived access JWTs, rotating refresh tokens.** Access tokens last 15 minutes and are never stored server-side. Refresh tokens are random, stored only as SHA-256 hashes, and work once: each refresh issues a successor in the same family, and presenting a used token revokes the whole family (it was copied). On the dashboard the refresh token lives in an httpOnly, SameSite=Lax cookie on the dashboard's own origin, set by Next.js route handlers that proxy to the API, so page JavaScript only ever sees the access token. Tabs serialise refreshes with a Web Lock so they don't trip reuse detection on each other.
+- **Socket auth at the handshake, refresh in place.** A socket must present a valid access token to connect. Before the token expires, the client sends `auth:refresh` with its next token; the server swaps it in and the socket keeps its id and rooms. A socket whose token runs out unrefreshed gets `auth:expired` and is disconnected, so revoking a session (logout, reuse) cuts off its sockets within one token lifetime.
 - **Shared zod schemas in a workspace package.** The server, the dashboard and (later) the rider app validate the same payloads with the same code, and socket events are typed end to end.
 - **Tests run against real Postgres and Redis (Testcontainers), not mocks.** The guarantees above come from database constraints and Redis pub/sub. Mocks would test none of them.
 - **Migrations run on start-up.** On a single-instance free-tier deploy, this guarantees the schema matches the code. With multiple instances it would move to a separate release step.
 
 ## Deployment
 
-- **Server:** `render.yaml` is a Render Blueprint that creates the web service (Docker, built from the root `Dockerfile`), PostgreSQL and Key Value (Redis). Connect the repo in Render → **New → Blueprint**, then set `CORS_ORIGINS` to the dashboard's URL.
+- **Server:** `render.yaml` is a Render Blueprint that creates the web service (Docker, built from the root `Dockerfile`), PostgreSQL and Key Value (Redis). Connect the repo in Render → **New → Blueprint**, then set `CORS_ORIGINS` to the dashboard's URL (`JWT_SECRET` is generated for you). Create dispatchers from the service's shell with `node dist/scripts/create-dispatcher.js --email … --name …`.
 - **Dashboard:** deploy `apps/web` to Vercel (set the project root directory to `apps/web`; its `prebuild` script compiles `packages/shared` first) with `NEXT_PUBLIC_SERVER_URL` pointing at the Render service.
 
 ## License

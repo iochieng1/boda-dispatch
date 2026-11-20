@@ -5,6 +5,7 @@ import { loadConfig } from "../src/config.js";
 const validEnv = {
   DATABASE_URL: "postgres://u:p@localhost:5432/db",
   REDIS_URL: "redis://localhost:6379",
+  JWT_SECRET: "test-jwt-secret-that-is-at-least-32-chars",
 };
 
 describe("loadConfig", () => {
@@ -44,7 +45,15 @@ describe("loadConfig", () => {
     );
   });
 
+  it("rejects a JWT_SECRET shorter than 32 characters", () => {
+    expect(() => loadConfig({ ...validEnv, JWT_SECRET: "short" })).toThrow(
+      /JWT_SECRET/,
+    );
+  });
+
   it("fails fast and lists every missing variable", () => {
-    expect(() => loadConfig({})).toThrow(/DATABASE_URL[\s\S]*REDIS_URL/);
+    expect(() => loadConfig({})).toThrow(
+      /DATABASE_URL[\s\S]*REDIS_URL[\s\S]*JWT_SECRET/,
+    );
   });
 });

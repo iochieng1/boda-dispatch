@@ -61,6 +61,32 @@ export const dispatchers = pgTable(
   ],
 );
 
+/**
+ * Rotating refresh tokens. Each login starts a family; every refresh marks the
+ * presented token used and issues its successor in the same family. Presenting
+ * a used token means it was copied, so the whole family is revoked.
+ */
+export const refreshTokens = pgTable(
+  "refresh_tokens",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    dispatcherId: uuid("dispatcher_id")
+      .notNull()
+      .references(() => dispatchers.id, { onDelete: "cascade" }),
+    familyId: uuid("family_id").notNull(),
+    // SHA-256 of the token: a database leak can't be replayed.
+    tokenHash: text("token_hash").notNull().unique(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    usedAt: timestamp("used_at", { withTimezone: true }),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    index("refresh_tokens_family_idx").on(t.familyId),
+    index("refresh_tokens_dispatcher_idx").on(t.dispatcherId),
+  ],
+);
+
 export const jobs = pgTable(
   "jobs",
   {

@@ -13,10 +13,13 @@
     "test:watch": "vitest",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "tsx --env-file=.env src/db/migrate.ts",
-    "db:studio": "drizzle-kit studio"
+    "db:studio": "drizzle-kit studio",
+    "dispatcher:create": "tsx --env-file=.env src/scripts/create-dispatcher.ts"
   },
   "dependencies": {
     "@boda-dispatch/shared": "0.1.0",
+    "@fastify/jwt": "^10.2.8",
+    "@node-rs/argon2": "^2.2.2",
     "@socket.io/redis-adapter": "^8.3.0",
     "drizzle-orm": "^0.45.4",
     "fastify": "^5.12.8",
