@@ -56,7 +56,16 @@ export const attachSocketServer = (app: FastifyInstance, redis: Redis) => {
 
   const io: SocketServer = new Server(app.server, {
     cors: { origin: app.config.CORS_ORIGINS },
-    adapter: createAdapter(pubClient, subClient),
+  });
+
+  // The adapter subscribes as soon as it's created and doesn't handle a
+  // failure, so creating it while Redis is unreachable leaves unhandled
+  // rejections, which crash Node. Attach it once the subscriber is ready;
+  // until then the default in-memory adapter serves this instance alone.
+  // ioredis re-subscribes by itself after later reconnects.
+  subClient.once("ready", () => {
+    io.adapter(createAdapter(pubClient, subClient));
+    app.log.debug("Socket.IO Redis adapter attached");
   });
 
   // Timers can't live on socket.data: the adapter may serialise it.

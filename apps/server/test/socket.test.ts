@@ -146,6 +146,28 @@ describe("Socket.IO auth", () => {
     });
   });
 
+  describe("Redis adapter", () => {
+    it("lets another server instance see this instance's sockets", async () => {
+      const other = await buildTestApp();
+      try {
+        const dispatcher = await createDispatcher(app);
+        const client = open({
+          token: (await loginAs(app, dispatcher)).access_token,
+        });
+        await connected(client);
+
+        // fetchSockets on `other` must go through Redis to find the socket.
+        await expect
+          .poll(async () => (await other.io.fetchSockets()).map((s) => s.id), {
+            timeout: 5_000,
+          })
+          .toContain(client.id);
+      } finally {
+        await other.close();
+      }
+    });
+  });
+
   describe("token refresh on a live socket", () => {
     it("keeps the same socket session when the access token is refreshed", async () => {
       const dispatcher = await createDispatcher(app);
