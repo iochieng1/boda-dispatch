@@ -93,8 +93,14 @@ export const login = async (email: string, password: string) => {
   setSession(fromPayload((await res.json()) as SessionPayload));
 };
 
+/**
+ * Throws if the logout request didn't go through: the httpOnly cookie can
+ * only be cleared by the server, so pretending would leave the dispatcher
+ * signed in (on a shared terminal, for the next person too).
+ */
 export const logout = async () => {
-  await fetch("/api/auth/logout", { method: "POST" }).catch(() => undefined);
+  const res = await fetch("/api/auth/logout", { method: "POST" });
+  if (!res.ok) throw new Error(`Logout failed: ${res.status}`);
   setSession(null);
 };
 

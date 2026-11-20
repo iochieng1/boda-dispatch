@@ -7,6 +7,7 @@ import { getSession, logout, onSessionChange } from "@/lib/session";
 
 export function SessionBar() {
   const [dispatcher, setDispatcher] = useState<DispatcherProfile | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     getSession().then(
@@ -19,7 +20,13 @@ export function SessionBar() {
   }, []);
 
   const signOut = async () => {
-    await logout();
+    setError(null);
+    try {
+      await logout();
+    } catch {
+      setError("Sign-out failed. Check your connection and try again.");
+      return;
+    }
     window.location.assign("/login");
   };
 
@@ -37,6 +44,11 @@ export function SessionBar() {
       >
         Sign out
       </button>
+      {error && (
+        <p role="alert" className="text-red-600">
+          {error}
+        </p>
+      )}
     </div>
   );
 }
