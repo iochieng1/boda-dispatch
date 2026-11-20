@@ -17,6 +17,9 @@ services:
       - key: CORS_ORIGINS
         sync: false # e.g. https://boda-dispatch.vercel.app
       # Signs dispatcher access tokens. Render generates a random value once.
+      # Render's proxy sets X-Forwarded-For; needed for per-IP login limits.
+      - key: TRUST_PROXY
+        value: "true"
       - key: JWT_SECRET
         generateValue: true
       - key: DATABASE_URL

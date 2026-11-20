@@ -61,6 +61,18 @@ const authRoutes: FastifyPluginAsync = async (app) => {
     const body = parseBody(loginInputSchema, request, reply);
     if (!body) return reply;
 
+    const limit = await app.loginLimiter(request.ip, body.email);
+    if (!limit.allowed) {
+      return reply
+        .code(429)
+        .header("retry-after", String(limit.retryAfterSeconds))
+        .send({
+          statusCode: 429,
+          error: "Too Many Requests",
+          message: "Too many login attempts. Try again later.",
+        });
+    }
+
     const [dispatcher] = await app.db
       .select({
         id: dispatchers.id,

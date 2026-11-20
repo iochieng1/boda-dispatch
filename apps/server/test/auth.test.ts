@@ -151,6 +151,70 @@ describe("dispatcher auth", () => {
     });
   });
 
+  describe("POST /v1/auth/login rate limits", () => {
+    const loginOn = (target: App, payload: Record<string, unknown>) =>
+      target.inject({ method: "POST", url: "/v1/auth/login", payload });
+
+    it("throttles an email after too many attempts, even with the right password", async () => {
+      const limited = await buildTestApp({ LOGIN_MAX_ATTEMPTS_PER_EMAIL: 3 });
+      try {
+        const dispatcher = await createDispatcher(limited);
+        const wrong = { email: dispatcher.email, password: "wrong-password" };
+        for (let i = 0; i < 3; i++) {
+          expect((await loginOn(limited, wrong)).statusCode).toBe(401);
+        }
+
+        const res = await loginOn(limited, {
+          email: dispatcher.email.toUpperCase(),
+          password: dispatcher.password,
+        });
+
+        expect(res.statusCode).toBe(429);
+        expect(Number(res.headers["retry-after"])).toBeGreaterThan(0);
+        expect(res.json().message).toBe(
+          "Too many login attempts. Try again later.",
+        );
+      } finally {
+        await limited.close();
+      }
+    });
+
+    it("throttles an IP across different emails", async () => {
+      const limited = await buildTestApp({ LOGIN_MAX_ATTEMPTS_PER_IP: 2 });
+      try {
+        const attempt = () =>
+          loginOn(limited, {
+            email: `nobody-${randomUUID()}@boda.example`,
+            password: "whatever",
+          });
+
+        expect((await attempt()).statusCode).toBe(401);
+        expect((await attempt()).statusCode).toBe(401);
+        expect((await attempt()).statusCode).toBe(429);
+      } finally {
+        await limited.close();
+      }
+    });
+
+    it("allows logins when Redis is down rather than locking everyone out", async () => {
+      const dispatcher = await createDispatcher(app);
+      const evalSpy = vi
+        .spyOn(app.redis, "eval")
+        .mockRejectedValue(new Error("Connection is closed."));
+      try {
+        const res = await loginOn(app, {
+          email: dispatcher.email,
+          password: dispatcher.password,
+        });
+
+        expect(res.statusCode).toBe(200);
+        expect(evalSpy).toHaveBeenCalled();
+      } finally {
+        evalSpy.mockRestore();
+      }
+    });
+  });
+
   describe("GET /v1/auth/me (protected)", () => {
     it("returns the dispatcher for a valid token", async () => {
       const dispatcher = await createDispatcher(app);

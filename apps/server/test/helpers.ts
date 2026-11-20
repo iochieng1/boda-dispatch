@@ -18,12 +18,17 @@ export const testConfig = (overrides: Partial<Config> = {}): Config => ({
     // Strict by default so reuse detection is tested directly; the grace
     // window has its own tests.
     REFRESH_REUSE_GRACE_SECONDS: "0",
+    // Many logins come from 127.0.0.1; the limiter has its own tests.
+    LOGIN_MAX_ATTEMPTS_PER_IP: "10000",
   }),
   ...overrides,
 });
 
+// Test files share one Redis, so each app gets its own rate-limit keys.
 export const buildTestApp = (overrides: Partial<Config> = {}) =>
-  buildApp(testConfig(overrides));
+  buildApp(testConfig(overrides), {
+    rateLimitPrefix: `ratelimit:test:${randomUUID()}`,
+  });
 
 type App = Awaited<ReturnType<typeof buildApp>>;
 

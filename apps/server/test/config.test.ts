@@ -16,6 +16,10 @@ describe("loadConfig", () => {
       PORT: 4000,
       HOST: "0.0.0.0",
       LOG_LEVEL: "info",
+      LOGIN_MAX_ATTEMPTS_PER_IP: 20,
+      LOGIN_MAX_ATTEMPTS_PER_EMAIL: 10,
+      LOGIN_RATE_WINDOW_SECONDS: 900,
+      TRUST_PROXY: false,
       REFRESH_REUSE_GRACE_SECONDS: 30,
       CORS_ORIGINS: ["http://localhost:3000"],
     });
