@@ -64,11 +64,15 @@ export function ConnectionStatus() {
 
     /** Gets a new token and, if needed, a new socket connection. */
     const recover = async () => {
+      if (stopped) return;
       try {
         const session = await refreshSession();
         if (!session) return redirectToLogin();
         if (!socket.connected && !stopped) socket.connect();
       } catch {
+        // Network error or API down: keep trying until it comes back.
+        setStatus("reconnecting");
+        clearTimeout(refreshTimer);
         refreshTimer = setTimeout(() => void recover(), RETRY_MS);
       }
     };
@@ -139,7 +143,12 @@ export function ConnectionStatus() {
         scheduleRefresh(session.expiresAt);
         socket.connect();
       },
-      () => setStatus("disconnected"),
+      () => {
+        // The API was unreachable on load (e.g. mid-deploy): retry rather
+        // than staying offline until a manual reload.
+        setStatus("reconnecting");
+        refreshTimer = setTimeout(() => void recover(), RETRY_MS);
+      },
     );
 
     return () => {
