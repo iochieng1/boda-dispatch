@@ -4,6 +4,7 @@ import { Redis } from "ioredis";
 
 import { ACCESS_TOKEN_TTL_SECONDS, authenticate } from "./auth/authenticate.js";
 import { createLoginLimiter, type LoginLimiter } from "./auth/login-limit.js";
+import { prepareDummyHash } from "./auth/password.js";
 import type { Config } from "./config.js";
 import { createDb, type Database } from "./db/client.js";
 import { attachSocketServer, type SocketServer } from "./realtime/socket.js";
@@ -74,6 +75,8 @@ export const buildApp = async (
   app.addHook("onClose", async () => {
     await Promise.allSettled([sql.end(), redis.quit()]);
   });
+
+  await prepareDummyHash();
 
   await app.register(healthRoutes);
   await app.register(authRoutes, { prefix: "/v1/auth" });

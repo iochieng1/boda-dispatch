@@ -43,13 +43,19 @@ export const verifyPassword = (passwordHash: string, password: string) =>
 let dummyHash: Promise<string> | undefined;
 
 /**
+ * Computes the throwaway hash up front (called at start-up), so the first
+ * unknown-email login doesn't pay for an extra hash and stand out by timing.
+ */
+export const prepareDummyHash = () =>
+  (dummyHash ??= hashPassword("boda-dispatch-dummy-password"));
+
+/**
  * Runs a full argon2 verification against a throwaway hash. Login calls this
  * when the email is unknown, so the response takes as long as a wrong password
  * and timing doesn't reveal which emails belong to dispatchers.
  */
 export const verifyAgainstDummyHash = async (password: string) => {
-  dummyHash ??= hashPassword("boda-dispatch-dummy-password");
-  const target = await dummyHash;
+  const target = await prepareDummyHash();
   await limited(() => verify(target, password));
   return false;
 };
