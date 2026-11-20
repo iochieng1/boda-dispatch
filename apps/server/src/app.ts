@@ -5,6 +5,9 @@ import { Redis } from "ioredis";
 import { ACCESS_TOKEN_TTL_SECONDS, authenticate } from "./auth/authenticate.js";
 import { createLoginLimiter, type LoginLimiter } from "./auth/login-limit.js";
 import { prepareDummyHash } from "./auth/password.js";
+import { purgeExpiredRefreshTokens } from "./auth/refresh-tokens.js";
+
+const REFRESH_TOKEN_PURGE_INTERVAL_MS = 60 * 60 * 1000;
 import type { Config } from "./config.js";
 import { createDb, type Database } from "./db/client.js";
 import { attachSocketServer, type SocketServer } from "./realtime/socket.js";
@@ -72,7 +75,19 @@ export const buildApp = async (
 
   app.decorate("io", attachSocketServer(app, redis));
 
+  // Expired tokens are already rejected; this just keeps the table small.
+  const purgeTimer = setInterval(() => {
+    purgeExpiredRefreshTokens(db).then(
+      (count) =>
+        count > 0 && app.log.info({ count }, "Purged expired refresh tokens"),
+      (err: unknown) =>
+        app.log.error({ err }, "Failed to purge expired refresh tokens"),
+    );
+  }, REFRESH_TOKEN_PURGE_INTERVAL_MS);
+  purgeTimer.unref();
+
   app.addHook("onClose", async () => {
+    clearInterval(purgeTimer);
     await Promise.allSettled([sql.end(), redis.quit()]);
   });
 

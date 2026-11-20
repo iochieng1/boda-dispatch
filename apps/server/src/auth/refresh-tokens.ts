@@ -1,6 +1,6 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 
-import { and, eq, isNull, sql } from "drizzle-orm";
+import { and, eq, isNull, lt, sql } from "drizzle-orm";
 
 import type { Database } from "../db/client.js";
 import { refreshTokens } from "../db/schema.js";
@@ -131,3 +131,16 @@ export const revokeRefreshTokenFamily = (db: Database, token: string) =>
     await lockFamily(tx, familyId);
     await revokeFamilyLocked(tx, familyId);
   });
+
+/**
+ * Deletes tokens past their expiry. Only expired rows go: a used but
+ * unexpired row must stay, or presenting it again would look "unknown"
+ * instead of revoking its family. Returns the number deleted.
+ */
+export const purgeExpiredRefreshTokens = async (db: Database) => {
+  const deleted = await db
+    .delete(refreshTokens)
+    .where(lt(refreshTokens.expiresAt, sql`now()`))
+    .returning({ id: refreshTokens.id });
+  return deleted.length;
+};

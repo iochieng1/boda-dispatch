@@ -4,7 +4,10 @@ import { eq } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 import type { buildApp } from "../src/app.js";
-import { hashRefreshToken } from "../src/auth/refresh-tokens.js";
+import {
+  hashRefreshToken,
+  purgeExpiredRefreshTokens,
+} from "../src/auth/refresh-tokens.js";
 import { dispatchers, refreshTokens } from "../src/db/schema.js";
 import { buildTestApp, createDispatcher, loginAs } from "./helpers.js";
 
@@ -450,6 +453,28 @@ describe("dispatcher auth", () => {
       });
 
       expect((await refreshOn(refresh_token)).statusCode).toBe(401);
+    });
+  });
+
+  describe("purgeExpiredRefreshTokens", () => {
+    it("deletes expired tokens and keeps used-but-live ones for reuse detection", async () => {
+      const dispatcher = await createDispatcher(app);
+      const { refresh_token: expired } = await loginAs(app, dispatcher);
+      const { refresh_token: used } = await loginAs(app, dispatcher);
+      await refresh(used);
+      await app.db
+        .update(refreshTokens)
+        .set({ expiresAt: new Date(Date.now() - 1000) })
+        .where(eq(refreshTokens.tokenHash, hashRefreshToken(expired)));
+
+      expect(await purgeExpiredRefreshTokens(app.db)).toBeGreaterThanOrEqual(1);
+
+      const [gone] = await app.db
+        .select()
+        .from(refreshTokens)
+        .where(eq(refreshTokens.tokenHash, hashRefreshToken(expired)));
+      expect(gone).toBeUndefined();
+      expect((await tokenRow(used)).usedAt).not.toBeNull();
     });
   });
 
