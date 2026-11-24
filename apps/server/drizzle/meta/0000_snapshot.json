@@ -163,12 +163,8 @@
           "name": "job_events_job_id_jobs_id_fk",
           "tableFrom": "job_events",
           "tableTo": "jobs",
-          "columnsFrom": [
-            "job_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["job_id"],
+          "columnsTo": ["id"],
           "onDelete": "no action",
           "onUpdate": "no action"
         }
@@ -318,12 +314,8 @@
           "name": "jobs_assigned_rider_id_riders_id_fk",
           "tableFrom": "jobs",
           "tableTo": "riders",
-          "columnsFrom": [
-            "assigned_rider_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["assigned_rider_id"],
+          "columnsTo": ["id"],
           "onDelete": "no action",
           "onUpdate": "no action"
         },
@@ -331,12 +323,8 @@
           "name": "jobs_created_by_dispatchers_id_fk",
           "tableFrom": "jobs",
           "tableTo": "dispatchers",
-          "columnsFrom": [
-            "created_by"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["created_by"],
+          "columnsTo": ["id"],
           "onDelete": "no action",
           "onUpdate": "no action"
         }
@@ -432,9 +420,7 @@
         "riders_phone_unique": {
           "name": "riders_phone_unique",
           "nullsNotDistinct": false,
-          "columns": [
-            "phone"
-          ]
+          "columns": ["phone"]
         }
       },
       "policies": {},
@@ -446,31 +432,17 @@
     "public.actor_type": {
       "name": "actor_type",
       "schema": "public",
-      "values": [
-        "DISPATCHER",
-        "RIDER",
-        "SYSTEM"
-      ]
+      "values": ["DISPATCHER", "RIDER", "SYSTEM"]
     },
     "public.job_status": {
       "name": "job_status",
       "schema": "public",
-      "values": [
-        "CREATED",
-        "ASSIGNED",
-        "PICKED_UP",
-        "DELIVERED",
-        "CANCELLED"
-      ]
+      "values": ["CREATED", "ASSIGNED", "PICKED_UP", "DELIVERED", "CANCELLED"]
     },
     "public.rider_status": {
       "name": "rider_status",
       "schema": "public",
-      "values": [
-        "OFFLINE",
-        "AVAILABLE",
-        "BUSY"
-      ]
+      "values": ["OFFLINE", "AVAILABLE", "BUSY"]
     }
   },
   "schemas": {},

@@ -13,6 +13,7 @@ import { createDb, type Database } from "./db/client.js";
 import { attachSocketServer, type SocketServer } from "./realtime/socket.js";
 import authRoutes from "./routes/auth.js";
 import healthRoutes from "./routes/health.js";
+import jobRoutes from "./routes/jobs.js";
 
 declare module "fastify" {
   interface FastifyInstance {
@@ -95,6 +96,7 @@ export const buildApp = async (
 
   await app.register(healthRoutes);
   await app.register(authRoutes, { prefix: "/v1/auth" });
+  await app.register(jobRoutes, { prefix: "/v1/jobs" });
 
   return app;
 };
