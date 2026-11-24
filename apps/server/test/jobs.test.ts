@@ -377,7 +377,7 @@ describe("jobs", () => {
       }
     });
 
-    it("returns 404 for an unknown rider and leaves the job alone", async () => {
+    it("returns 400 on assignedRiderId for an unknown rider and leaves the job alone", async () => {
       const job = await create();
 
       const res = await patch(job.id, {
@@ -385,8 +385,10 @@ describe("jobs", () => {
         assignedRiderId: randomUUID(),
       });
 
-      expect(res.statusCode).toBe(404);
-      expect(res.json().message).toBe("Rider not found");
+      expect(res.statusCode).toBe(400);
+      expect(res.json().issues).toEqual([
+        { path: "assignedRiderId", message: "Rider not found" },
+      ]);
       expect((await trail(job.id)).length).toBe(1);
     });
 

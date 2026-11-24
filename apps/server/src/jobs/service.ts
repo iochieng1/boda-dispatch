@@ -137,6 +137,7 @@ export const listJobs = async (
 export type ChangeJobResult =
   | { kind: "ok"; job: Job }
   | { kind: "not_found" }
+  /** The rider in the request doesn't exist. */
   | { kind: "rider_not_found" }
   /** The job's current state doesn't allow the change. */
   | { kind: "conflict"; message: string; job: Job };

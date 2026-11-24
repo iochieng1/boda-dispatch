@@ -28,10 +28,13 @@ const sendChangeResult = (reply: FastifyReply, result: ChangeJobResult) => {
         message: "Job not found",
       });
     case "rider_not_found":
-      return reply.code(404).send({
-        statusCode: 404,
-        error: "Not Found",
-        message: "Rider not found",
+      // The route exists; it's a field that is wrong, so answer like any
+      // other bad field rather than with the 404 used for a missing job.
+      return reply.code(400).send({
+        statusCode: 400,
+        error: "Bad Request",
+        message: "Invalid request body",
+        issues: [{ path: "assignedRiderId", message: "Rider not found" }],
       });
     case "conflict":
       return reply.code(409).send({
