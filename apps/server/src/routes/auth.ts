@@ -5,8 +5,7 @@ import {
   type TokenPair,
 } from "@boda-dispatch/shared";
 import { sql } from "drizzle-orm";
-import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from "fastify";
-import type { z } from "zod";
+import type { FastifyPluginAsync, FastifyReply } from "fastify";
 
 import {
   ACCESS_TOKEN_TTL_SECONDS,
@@ -20,26 +19,7 @@ import {
   rotateRefreshToken,
 } from "../auth/refresh-tokens.js";
 import { dispatchers } from "../db/schema.js";
-
-/** Parses the body with a shared zod schema, replying 400 on failure. */
-const parseBody = <T extends z.ZodType>(
-  schema: T,
-  request: FastifyRequest,
-  reply: FastifyReply,
-): z.infer<T> | undefined => {
-  const result = schema.safeParse(request.body);
-  if (result.success) return result.data;
-  void reply.code(400).send({
-    statusCode: 400,
-    error: "Bad Request",
-    message: "Invalid request body",
-    issues: result.error.issues.map(({ path, message }) => ({
-      path: path.join("."),
-      message,
-    })),
-  });
-  return undefined;
-};
+import { parseInput } from "./validate.js";
 
 const unauthorized = (reply: FastifyReply, message: string) =>
   reply.code(401).send({ statusCode: 401, error: "Unauthorized", message });
@@ -58,7 +38,7 @@ const authRoutes: FastifyPluginAsync = async (app) => {
   });
 
   app.post("/login", async (request, reply) => {
-    const body = parseBody(loginInputSchema, request, reply);
+    const body = parseInput(loginInputSchema, request.body, reply);
     if (!body) return reply;
 
     const limit = await app.loginLimiter(request.ip, body.email);
@@ -103,7 +83,7 @@ const authRoutes: FastifyPluginAsync = async (app) => {
   });
 
   app.post("/refresh", async (request, reply) => {
-    const body = parseBody(refreshInputSchema, request, reply);
+    const body = parseInput(refreshInputSchema, request.body, reply);
     if (!body) return reply;
 
     const result = await rotateRefreshToken(app.db, body.refresh_token, {
@@ -125,7 +105,7 @@ const authRoutes: FastifyPluginAsync = async (app) => {
   });
 
   app.post("/logout", async (request, reply) => {
-    const body = parseBody(refreshInputSchema, request, reply);
+    const body = parseInput(refreshInputSchema, request.body, reply);
     if (!body) return reply;
 
     await revokeRefreshTokenFamily(app.db, body.refresh_token);

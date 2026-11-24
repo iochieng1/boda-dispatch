@@ -1,4 +1,5 @@
 import { ConnectionStatus } from "./connection-status";
+import { NewJobForm } from "./new-job-form";
 import { SessionBar } from "./session-bar";
 
 export default function Home() {
@@ -14,6 +15,7 @@ export default function Home() {
         <SessionBar />
       </header>
       <ConnectionStatus />
+      <NewJobForm />
     </main>
   );
 }
