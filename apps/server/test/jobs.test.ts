@@ -1,11 +1,11 @@
 import { randomUUID } from "node:crypto";
 
 import type { Job, JobPage } from "@boda-dispatch/shared";
-import { eq } from "drizzle-orm";
+import { asc, eq } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import type { buildApp } from "../src/app.js";
-import { jobEvents, jobs } from "../src/db/schema.js";
+import { jobEvents, jobs, riders } from "../src/db/schema.js";
 import { buildTestApp, createDispatcher, loginAs } from "./helpers.js";
 
 type App = Awaited<ReturnType<typeof buildApp>>;
@@ -47,6 +47,59 @@ describe("jobs", () => {
 
   const list = (query = "") =>
     app.inject({ method: "GET", url: `/v1/jobs${query}`, headers: auth });
+
+  const createRider = async () => {
+    const [rider] = await app.db
+      .insert(riders)
+      .values({
+        name: "Otieno",
+        phone: `2547${Math.floor(10_000_000 + Math.random() * 89_999_999)}`,
+      })
+      .returning({ id: riders.id });
+    return rider!.id;
+  };
+
+  const patch = (id: string, payload: Record<string, unknown>) =>
+    app.inject({
+      method: "PATCH",
+      url: `/v1/jobs/${id}`,
+      payload,
+      headers: auth,
+    });
+
+  const cancel = (id: string, payload: Record<string, unknown> = {}) =>
+    app.inject({
+      method: "POST",
+      url: `/v1/jobs/${id}/cancel`,
+      payload,
+      headers: auth,
+    });
+
+  const trail = (id: string) =>
+    app.db
+      .select()
+      .from(jobEvents)
+      .where(eq(jobEvents.jobId, id))
+      .orderBy(asc(jobEvents.id));
+
+  const assign = async (job: Job) =>
+    patch(job.id, { status: "ASSIGNED", assignedRiderId: await createRider() });
+
+  /** A job moved to `status` through the API. */
+  const jobIn = async (status: Job["status"]) => {
+    const job = await create();
+    if (status === "CREATED") return job;
+    if (status === "CANCELLED") {
+      await cancel(job.id);
+      return job;
+    }
+    await assign(job);
+    if (status === "ASSIGNED") return job;
+    await patch(job.id, { status: "PICKED_UP" });
+    if (status === "PICKED_UP") return job;
+    await patch(job.id, { status: "DELIVERED" });
+    return job;
+  };
 
   describe("POST /v1/jobs", () => {
     it("creates a CREATED job owned by the dispatcher", async () => {
@@ -176,6 +229,283 @@ describe("jobs", () => {
       expect((await list("?limit=0")).statusCode).toBe(400);
       expect((await list("?cursor=nope")).statusCode).toBe(400);
       expect((await list(`?cursor=${randomUUID()}`)).statusCode).toBe(400);
+    });
+  });
+
+  describe("PATCH /v1/jobs/:id", () => {
+    it("edits the job, bumps the version and records what changed", async () => {
+      const job = await create();
+      const newDropoff = { ...dropoff, address: "Sarit Centre, Westlands" };
+
+      const res = await patch(job.id, {
+        dropoff: newDropoff,
+        parcelDescription: "Two envelopes",
+      });
+
+      expect(res.statusCode).toBe(200);
+      expect(res.json<Job>()).toMatchObject({
+        dropoff: newDropoff,
+        parcelDescription: "Two envelopes",
+        status: "CREATED",
+        version: 2,
+      });
+      const events = await trail(job.id);
+      expect(events.map((e) => e.type)).toEqual(["JOB_CREATED", "JOB_UPDATED"]);
+      expect(events[1]).toMatchObject({
+        actorId: dispatcher.id,
+        payload: {
+          changes: {
+            dropoff: { from: dropoff, to: newDropoff },
+            parcelDescription: {
+              from: "Envelope for the lawyer",
+              to: "Two envelopes",
+            },
+          },
+        },
+      });
+    });
+
+    it("does nothing, and logs nothing, when nothing differs", async () => {
+      const job = await create();
+
+      const res = await patch(job.id, {
+        parcelDescription: job.parcelDescription,
+        pickup,
+      });
+
+      expect(res.statusCode).toBe(200);
+      expect(res.json<Job>().version).toBe(1);
+      expect(await trail(job.id)).toHaveLength(1);
+    });
+
+    it("assigns a rider", async () => {
+      const job = await create();
+      const riderId = await createRider();
+
+      const res = await patch(job.id, {
+        status: "ASSIGNED",
+        assignedRiderId: riderId,
+      });
+
+      expect(res.statusCode).toBe(200);
+      expect(res.json<Job>()).toMatchObject({
+        status: "ASSIGNED",
+        assignedRiderId: riderId,
+        version: 2,
+      });
+    });
+
+    it("keeps a complete audit trail through the whole lifecycle", async () => {
+      const job = await create();
+      const riderId = await createRider();
+
+      await patch(job.id, { status: "ASSIGNED", assignedRiderId: riderId });
+      await patch(job.id, { parcelDescription: "Envelope, sealed" });
+      await patch(job.id, { status: "PICKED_UP" });
+      const delivered = await patch(job.id, { status: "DELIVERED" });
+
+      expect(delivered.json<Job>()).toMatchObject({
+        status: "DELIVERED",
+        version: 5,
+      });
+      const events = await trail(job.id);
+      expect(events.map((e) => [e.type, e.payload])).toEqual([
+        ["JOB_CREATED", expect.objectContaining({ pickup, dropoff })],
+        [
+          "JOB_STATUS_CHANGED",
+          { from: "CREATED", to: "ASSIGNED", assignedRiderId: riderId },
+        ],
+        ["JOB_UPDATED", expect.anything()],
+        ["JOB_STATUS_CHANGED", { from: "ASSIGNED", to: "PICKED_UP" }],
+        ["JOB_STATUS_CHANGED", { from: "PICKED_UP", to: "DELIVERED" }],
+      ]);
+      expect(events.every((e) => e.actorId === dispatcher.id)).toBe(true);
+    });
+
+    it.each([
+      ["CREATED", "PICKED_UP"],
+      ["CREATED", "DELIVERED"],
+      ["CREATED", "CREATED"],
+      ["ASSIGNED", "CREATED"],
+      ["ASSIGNED", "DELIVERED"],
+      ["PICKED_UP", "ASSIGNED"],
+    ] as const)("returns 409 for %s -> %s", async (from, to) => {
+      const job = await jobIn(from);
+      const before = await trail(job.id);
+      const riderId = to === "ASSIGNED" ? await createRider() : undefined;
+
+      const res = await patch(job.id, {
+        status: to,
+        ...(riderId && { assignedRiderId: riderId }),
+      });
+
+      expect(res.statusCode).toBe(409);
+      expect(res.json()).toMatchObject({
+        error: "Conflict",
+        message: `Cannot move a job from ${from} to ${to}`,
+        job: { id: job.id, status: from },
+      });
+      expect(await trail(job.id)).toHaveLength(before.length);
+    });
+
+    it.each(["DELIVERED", "CANCELLED"] as const)(
+      "returns 409 for any change to a %s job",
+      async (status) => {
+        const job = await jobIn(status);
+        const before = await trail(job.id);
+
+        for (const change of [
+          { parcelDescription: "Too late" },
+          { status: "CANCELLED" },
+        ]) {
+          const res = await patch(job.id, change);
+          expect(res.statusCode).toBe(409);
+          expect(res.json().message).toBe(
+            `Job is ${status} and can no longer change`,
+          );
+        }
+        expect(await trail(job.id)).toHaveLength(before.length);
+      },
+    );
+
+    it("lets a dispatcher cancel through PATCH from any open status", async () => {
+      for (const from of ["CREATED", "ASSIGNED", "PICKED_UP"] as const) {
+        const job = await jobIn(from);
+        const res = await patch(job.id, { status: "CANCELLED" });
+        expect(res.statusCode).toBe(200);
+        expect(res.json<Job>().status).toBe("CANCELLED");
+      }
+    });
+
+    it("returns 404 for an unknown rider and leaves the job alone", async () => {
+      const job = await create();
+
+      const res = await patch(job.id, {
+        status: "ASSIGNED",
+        assignedRiderId: randomUUID(),
+      });
+
+      expect(res.statusCode).toBe(404);
+      expect(res.json().message).toBe("Rider not found");
+      expect((await trail(job.id)).length).toBe(1);
+    });
+
+    it("returns 404 for an unknown job", async () => {
+      const res = await patch(randomUUID(), { parcelDescription: "x" });
+      expect(res.statusCode).toBe(404);
+    });
+
+    it("returns 400 for a bad id or body", async () => {
+      const job = await create();
+      expect(
+        (await patch("not-a-uuid", { parcelDescription: "x" })).statusCode,
+      ).toBe(400);
+      expect((await patch(job.id, {})).statusCode).toBe(400);
+      expect((await patch(job.id, { status: "ASSIGNED" })).statusCode).toBe(
+        400,
+      );
+      expect((await patch(job.id, { version: 3 })).statusCode).toBe(400);
+    });
+
+    it("requires authentication", async () => {
+      const job = await create();
+      const res = await app.inject({
+        method: "PATCH",
+        url: `/v1/jobs/${job.id}`,
+        payload: { parcelDescription: "x" },
+      });
+      expect(res.statusCode).toBe(401);
+    });
+
+    it("lets only one of two simultaneous assignments win", async () => {
+      const job = await create();
+      const [a, b] = [await createRider(), await createRider()];
+
+      const results = await Promise.all([
+        patch(job.id, { status: "ASSIGNED", assignedRiderId: a }),
+        patch(job.id, { status: "ASSIGNED", assignedRiderId: b }),
+      ]);
+
+      expect(results.map((r) => r.statusCode).sort()).toEqual([200, 409]);
+      const events = await trail(job.id);
+      expect(
+        events.filter((e) => e.type === "JOB_STATUS_CHANGED"),
+      ).toHaveLength(1);
+      const winner = results.find((r) => r.statusCode === 200)!.json<Job>();
+      const [row] = await app.db.select().from(jobs).where(eq(jobs.id, job.id));
+      expect(row!.assignedRiderId).toBe(winner.assignedRiderId);
+      expect(row!.version).toBe(2);
+    });
+  });
+
+  describe("POST /v1/jobs/:id/cancel", () => {
+    it.each(["CREATED", "ASSIGNED", "PICKED_UP"] as const)(
+      "cancels a %s job and records the reason",
+      async (from) => {
+        const job = await jobIn(from);
+
+        const res = await cancel(job.id, { reason: "Customer called" });
+
+        expect(res.statusCode).toBe(200);
+        expect(res.json<Job>()).toMatchObject({ status: "CANCELLED" });
+        const events = await trail(job.id);
+        expect(events.at(-1)).toMatchObject({
+          type: "JOB_STATUS_CHANGED",
+          actorId: dispatcher.id,
+          payload: { from, to: "CANCELLED", reason: "Customer called" },
+        });
+      },
+    );
+
+    it("keeps the rider on a cancelled job, for the record", async () => {
+      const job = await jobIn("ASSIGNED");
+      const before = (
+        await app.db.select().from(jobs).where(eq(jobs.id, job.id))
+      )[0]!;
+
+      const res = await cancel(job.id);
+
+      expect(res.json<Job>().assignedRiderId).toBe(before.assignedRiderId);
+    });
+
+    it("accepts a request with no body", async () => {
+      const job = await create();
+      const res = await app.inject({
+        method: "POST",
+        url: `/v1/jobs/${job.id}/cancel`,
+        headers: auth,
+      });
+      expect(res.statusCode).toBe(200);
+    });
+
+    it.each(["DELIVERED", "CANCELLED"] as const)(
+      "returns 409 for a %s job",
+      async (status) => {
+        const job = await jobIn(status);
+        const before = await trail(job.id);
+
+        const res = await cancel(job.id);
+
+        expect(res.statusCode).toBe(409);
+        expect(await trail(job.id)).toHaveLength(before.length);
+      },
+    );
+
+    it("returns 404 for an unknown job and 400 for a bad id or body", async () => {
+      expect((await cancel(randomUUID())).statusCode).toBe(404);
+      expect((await cancel("nope")).statusCode).toBe(400);
+      const job = await create();
+      expect((await cancel(job.id, { reason: "" })).statusCode).toBe(400);
+      expect((await cancel(job.id, { extra: 1 })).statusCode).toBe(400);
+    });
+
+    it("requires authentication", async () => {
+      const job = await create();
+      const res = await app.inject({
+        method: "POST",
+        url: `/v1/jobs/${job.id}/cancel`,
+      });
+      expect(res.statusCode).toBe(401);
     });
   });
 });

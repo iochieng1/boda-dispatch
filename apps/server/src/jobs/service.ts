@@ -1,14 +1,18 @@
-import type {
-  CreateJobInput,
-  Job,
-  JobEventType,
-  JobPage,
-  ListJobsQuery,
+import {
+  canTransition,
+  type CreateJobInput,
+  isTerminalStatus,
+  type Job,
+  type JobEventType,
+  type JobPage,
+  type ListJobsQuery,
+  type Location,
+  type UpdateJobInput,
 } from "@boda-dispatch/shared";
 import { and, desc, eq, sql } from "drizzle-orm";
 
 import type { Database } from "../db/client.js";
-import { jobEvents, jobs } from "../db/schema.js";
+import { jobEvents, jobs, riders } from "../db/schema.js";
 
 export type JobRow = typeof jobs.$inferSelect;
 
@@ -129,3 +133,137 @@ export const listJobs = async (
     nextCursor: rows.length > limit ? page[page.length - 1]!.id : null,
   };
 };
+
+export type ChangeJobResult =
+  | { kind: "ok"; job: Job }
+  | { kind: "not_found" }
+  | { kind: "rider_not_found" }
+  /** The job's current state doesn't allow the change. */
+  | { kind: "conflict"; message: string; job: Job };
+
+const sameLocation = (a: Location, b: Location) =>
+  a.address === b.address && a.lat === b.lat && a.lng === b.lng;
+
+const locationOf = (row: JobRow, which: "pickup" | "dropoff"): Location =>
+  toJob(row)[which];
+
+/**
+ * Edits a job and/or moves it to its next status, then appends what happened
+ * to the audit trail, all in one transaction. The row is locked first
+ * (SELECT ... FOR UPDATE), so two requests racing on one job run one after the
+ * other and the second is checked against the first one's result: a job can't
+ * be assigned twice or cancelled after it was delivered.
+ */
+export const changeJob = async (
+  db: Database,
+  dispatcherId: string,
+  jobId: string,
+  input: UpdateJobInput & { reason?: string },
+): Promise<ChangeJobResult> =>
+  db.transaction(async (tx): Promise<ChangeJobResult> => {
+    const [current] = await tx
+      .select()
+      .from(jobs)
+      .where(eq(jobs.id, jobId))
+      .for("update");
+    if (!current) return { kind: "not_found" };
+
+    const conflict = (message: string): ChangeJobResult => ({
+      kind: "conflict",
+      message,
+      job: toJob(current),
+    });
+
+    if (isTerminalStatus(current.status)) {
+      return conflict(`Job is ${current.status} and can no longer change`);
+    }
+
+    const { status, assignedRiderId } = input;
+    if (status && !canTransition(current.status, status)) {
+      return conflict(`Cannot move a job from ${current.status} to ${status}`);
+    }
+
+    if (assignedRiderId) {
+      const [rider] = await tx
+        .select({ id: riders.id })
+        .from(riders)
+        .where(eq(riders.id, assignedRiderId))
+        .limit(1);
+      if (!rider) return { kind: "rider_not_found" };
+    }
+
+    // Only fields that actually differ are written and recorded.
+    const changes: Record<string, { from: unknown; to: unknown }> = {};
+    const set: Partial<typeof jobs.$inferInsert> = {};
+
+    for (const which of ["pickup", "dropoff"] as const) {
+      const next = input[which];
+      const prev = locationOf(current, which);
+      if (next && !sameLocation(prev, next)) {
+        changes[which] = { from: prev, to: next };
+        Object.assign(
+          set,
+          which === "pickup"
+            ? {
+                pickupAddress: next.address,
+                pickupLat: next.lat,
+                pickupLng: next.lng,
+              }
+            : {
+                dropoffAddress: next.address,
+                dropoffLat: next.lat,
+                dropoffLng: next.lng,
+              },
+        );
+      }
+    }
+    if (
+      input.parcelDescription !== undefined &&
+      input.parcelDescription !== current.parcelDescription
+    ) {
+      changes.parcelDescription = {
+        from: current.parcelDescription,
+        to: input.parcelDescription,
+      };
+      set.parcelDescription = input.parcelDescription;
+    }
+    if (status) {
+      set.status = status;
+      if (assignedRiderId) set.assignedRiderId = assignedRiderId;
+    }
+
+    // Nothing differs: don't bump the version or pad the audit trail.
+    if (Object.keys(set).length === 0) {
+      return { kind: "ok", job: toJob(current) };
+    }
+
+    const [updated] = await tx
+      .update(jobs)
+      .set({ ...set, version: sql`${jobs.version} + 1`, updatedAt: sql`now()` })
+      .where(eq(jobs.id, jobId))
+      .returning();
+
+    if (Object.keys(changes).length > 0) {
+      await appendJobEvent(tx, {
+        jobId,
+        dispatcherId,
+        type: "JOB_UPDATED",
+        payload: { changes },
+      });
+    }
+    if (status) {
+      await appendJobEvent(tx, {
+        jobId,
+        dispatcherId,
+        type: "JOB_STATUS_CHANGED",
+        payload: {
+          from: current.status,
+          to: status,
+          ...(assignedRiderId && { assignedRiderId }),
+          ...(input.reason && { reason: input.reason }),
+        },
+      });
+    }
+
+    return { kind: "ok", job: toJob(updated!) };
+  });
