@@ -1,10 +1,15 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  canTransition,
+  cancelJobInputSchema,
   createJobInputSchema,
+  JOB_STATUSES,
   jobSchema,
   kenyanPhoneSchema,
+  listJobsQuerySchema,
   mutationEnvelopeSchema,
+  updateJobInputSchema,
 } from "../src/index.js";
 
 const location = {
@@ -99,5 +104,112 @@ describe("kenyanPhoneSchema", () => {
 
   it.each(["0812345678", "12345", "+255712345678"])("rejects %s", (input) => {
     expect(kenyanPhoneSchema.safeParse(input).success).toBe(false);
+  });
+});
+
+describe("canTransition", () => {
+  it.each([
+    ["CREATED", "ASSIGNED"],
+    ["ASSIGNED", "PICKED_UP"],
+    ["PICKED_UP", "DELIVERED"],
+    ["CREATED", "CANCELLED"],
+    ["ASSIGNED", "CANCELLED"],
+    ["PICKED_UP", "CANCELLED"],
+  ] as const)("allows %s -> %s", (from, to) => {
+    expect(canTransition(from, to)).toBe(true);
+  });
+
+  it.each([
+    ["CREATED", "PICKED_UP"],
+    ["CREATED", "DELIVERED"],
+    ["ASSIGNED", "CREATED"],
+    ["ASSIGNED", "DELIVERED"],
+    ["PICKED_UP", "ASSIGNED"],
+    ["CREATED", "CREATED"],
+  ] as const)("refuses %s -> %s", (from, to) => {
+    expect(canTransition(from, to)).toBe(false);
+  });
+
+  it("lets nothing leave DELIVERED or CANCELLED", () => {
+    for (const from of ["DELIVERED", "CANCELLED"] as const) {
+      for (const to of JOB_STATUSES) {
+        expect(canTransition(from, to)).toBe(false);
+      }
+    }
+  });
+});
+
+describe("updateJobInputSchema", () => {
+  const riderId = "6f1c2d3e-4b5a-4c6d-8e7f-9a0b1c2d3e4f";
+
+  it("accepts an edit of the parcel on its own", () => {
+    expect(
+      updateJobInputSchema.parse({ parcelDescription: " Laptop " }),
+    ).toEqual({ parcelDescription: "Laptop" });
+  });
+
+  it("accepts an assignment with a rider", () => {
+    expect(
+      updateJobInputSchema.safeParse({
+        status: "ASSIGNED",
+        assignedRiderId: riderId,
+      }).success,
+    ).toBe(true);
+  });
+
+  it("rejects an empty update", () => {
+    expect(updateJobInputSchema.safeParse({}).success).toBe(false);
+  });
+
+  it("rejects assigning without a rider", () => {
+    const result = updateJobInputSchema.safeParse({ status: "ASSIGNED" });
+    expect(result.error?.issues.map((i) => i.path.join("."))).toEqual([
+      "assignedRiderId",
+    ]);
+  });
+
+  it("rejects a rider without the ASSIGNED status", () => {
+    expect(
+      updateJobInputSchema.safeParse({ assignedRiderId: riderId }).success,
+    ).toBe(false);
+    expect(
+      updateJobInputSchema.safeParse({
+        status: "PICKED_UP",
+        assignedRiderId: riderId,
+      }).success,
+    ).toBe(false);
+  });
+
+  it("rejects fields a dispatcher may not set", () => {
+    expect(
+      updateJobInputSchema.safeParse({ version: 9, parcelDescription: "x" })
+        .success,
+    ).toBe(false);
+  });
+});
+
+describe("cancelJobInputSchema", () => {
+  it("makes the reason optional", () => {
+    expect(cancelJobInputSchema.parse({})).toEqual({});
+    expect(cancelJobInputSchema.parse({ reason: " Customer called " })).toEqual(
+      { reason: "Customer called" },
+    );
+  });
+});
+
+describe("listJobsQuerySchema", () => {
+  it("defaults the page size and coerces the limit from a query string", () => {
+    expect(listJobsQuerySchema.parse({}).limit).toBe(50);
+    expect(listJobsQuerySchema.parse({ limit: "10" }).limit).toBe(10);
+  });
+
+  it("rejects an unknown status, a bad cursor and an oversized page", () => {
+    expect(listJobsQuerySchema.safeParse({ status: "LOST" }).success).toBe(
+      false,
+    );
+    expect(listJobsQuerySchema.safeParse({ cursor: "abc" }).success).toBe(
+      false,
+    );
+    expect(listJobsQuerySchema.safeParse({ limit: "101" }).success).toBe(false);
   });
 });
