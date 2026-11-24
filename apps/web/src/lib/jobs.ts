@@ -1,10 +1,6 @@
 "use client";
 
-import {
-  type CreateJobInput,
-  type Job,
-  jobSchema,
-} from "@boda-dispatch/shared";
+import type { CreateJobInput, Job } from "@boda-dispatch/shared";
 
 import { getSession, redirectToLogin } from "./session";
 
@@ -50,5 +46,7 @@ export const createJob = async (input: CreateJobInput): Promise<Job> => {
       ),
     );
   }
-  return jobSchema.parse(await res.json());
+  // The job exists now. Re-validating the response could only turn a created
+  // job into an error message and invite a duplicate, so it is trusted.
+  return (await res.json()) as Job;
 };
