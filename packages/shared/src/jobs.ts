@@ -156,6 +156,19 @@ export const jobPageSchema = z.object({
 });
 export type JobPage = z.infer<typeof jobPageSchema>;
 
+/**
+ * GET /v1/jobs/changes: jobs touched at or after `since`, oldest change first,
+ * for a client that missed live events (e.g. across a reconnect). Pass
+ * `nextCursor` back as `cursor` for more. Clients apply a job only if its
+ * `version` is newer than the one they hold, so overlapping `since` is safe.
+ */
+export const jobChangesQuerySchema = z.object({
+  since: z.iso.datetime(),
+  cursor: z.uuid().optional(),
+  limit: listJobsQuerySchema.shape.limit,
+});
+export type JobChangesQuery = z.infer<typeof jobChangesQuerySchema>;
+
 /** `job_events.type` values. */
 export const JOB_EVENT_TYPES = [
   "JOB_CREATED",
