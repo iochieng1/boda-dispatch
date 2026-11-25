@@ -54,6 +54,7 @@ export function JobBoard() {
   }, []);
 
   // `sync` is the first load or, once we have seen jobs, the catch-up.
+  const hasLoaded = useRef(false);
   const syncing = useRef(false);
   const again = useRef(false);
   const sync = useCallback(async () => {
@@ -68,10 +69,11 @@ export function JobBoard() {
         again.current = false;
         const { lastSeen } = boardRef.current;
         apply(
-          lastSeen
+          lastSeen && hasLoaded.current
             ? await fetchJobChanges(resyncSince(lastSeen))
             : await fetchRecentJobs(),
         );
+        hasLoaded.current = true;
         setLoaded(true);
         setError(null);
       } while (again.current);

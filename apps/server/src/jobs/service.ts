@@ -3,6 +3,7 @@ import {
   type CreateJobInput,
   isTerminalStatus,
   type Job,
+  type JobChangesPage,
   type JobChangesQuery,
   type JobEventType,
   type JobPage,
@@ -136,34 +137,31 @@ export const listJobs = async (
 };
 
 /**
- * Jobs touched at or after `since`, oldest change first, keyset-paginated with
- * the last job's id as the cursor (same technique as listJobs). `since` has
- * millisecond precision while updated_at has microseconds, so a job changed
- * within the same millisecond is returned again rather than missed; clients
- * dedupe by version. A job edited again mid-scan moves to the end of the scan
- * and is picked up by a later page. Returns undefined for an unknown cursor.
+ * Jobs touched at or after `since`, oldest change first, keyset-paginated. The
+ * cursor is the last job's own (updated_at, id) as a microsecond-precision
+ * string, not a job id: if that job were edited between two page fetches, a
+ * cursor that looked its position up again would jump past every job changed
+ * in between. A job edited mid-scan simply reappears later in the scan.
+ * `since` has millisecond precision while updated_at has microseconds, so a
+ * job changed within the same millisecond is returned again rather than
+ * missed; clients dedupe by version.
  */
+const UPDATED_AT_TEXT = sql<string>`to_char(${jobs.updatedAt} at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`;
+
 export const listJobChanges = async (
   db: Database,
   { since, cursor, limit }: JobChangesQuery,
-): Promise<JobPage | undefined> => {
-  if (cursor) {
-    const [found] = await db
-      .select({ id: jobs.id })
-      .from(jobs)
-      .where(eq(jobs.id, cursor))
-      .limit(1);
-    if (!found) return undefined;
-  }
+): Promise<JobChangesPage> => {
+  const [cursorTime, cursorId] = cursor ? cursor.split("_") : [];
 
   const rows = await db
-    .select()
+    .select({ job: jobs, updatedAtText: UPDATED_AT_TEXT })
     .from(jobs)
     .where(
       and(
         sql`${jobs.updatedAt} >= ${since}::timestamptz`,
         cursor
-          ? sql`(${jobs.updatedAt}, ${jobs.id}) > (select j.updated_at, j.id from jobs j where j.id = ${cursor})`
+          ? sql`(${jobs.updatedAt}, ${jobs.id}) > (${cursorTime}::timestamptz, ${cursorId}::uuid)`
           : undefined,
       ),
     )
@@ -171,9 +169,13 @@ export const listJobChanges = async (
     .limit(limit + 1);
 
   const page = rows.slice(0, limit);
+  const last = page[page.length - 1];
   return {
-    jobs: page.map(toJob),
-    nextCursor: rows.length > limit ? page[page.length - 1]!.id : null,
+    jobs: page.map((row) => toJob(row.job)),
+    nextCursor:
+      rows.length > limit && last
+        ? `${last.updatedAtText}_${last.job.id}`
+        : null,
   };
 };
 

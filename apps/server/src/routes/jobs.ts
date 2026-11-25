@@ -100,15 +100,7 @@ const jobRoutes: FastifyPluginAsync = async (app) => {
     );
     if (!query) return reply;
 
-    const page = await listJobChanges(app.db, query);
-    if (!page) {
-      return reply.code(400).send({
-        statusCode: 400,
-        error: "Bad Request",
-        message: "Unknown cursor",
-      });
-    }
-    return page;
+    return listJobChanges(app.db, query);
   });
 
   app.patch("/:id", async (request, reply) => {
