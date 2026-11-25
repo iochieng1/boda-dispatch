@@ -1,25 +1,37 @@
 import {
   cancelJobInputSchema,
   createJobInputSchema,
+  jobChangesQuerySchema,
   listJobsQuerySchema,
   updateJobInputSchema,
 } from "@boda-dispatch/shared";
-import type { FastifyPluginAsync, FastifyReply } from "fastify";
+import type {
+  FastifyInstance,
+  FastifyPluginAsync,
+  FastifyReply,
+} from "fastify";
 import { z } from "zod";
 
 import {
   type ChangeJobResult,
   changeJob,
   createJob,
+  listJobChanges,
   listJobs,
 } from "../jobs/service.js";
+import { publishJob } from "../realtime/publish.js";
 import { parseInput } from "./validate.js";
 
 const jobParamsSchema = z.object({ id: z.uuid() });
 
-const sendChangeResult = (reply: FastifyReply, result: ChangeJobResult) => {
+const sendChangeResult = (
+  app: FastifyInstance,
+  reply: FastifyReply,
+  result: ChangeJobResult,
+) => {
   switch (result.kind) {
     case "ok":
+      if (result.changed) publishJob(app, "job:updated", result.job);
       return result.job;
     case "not_found":
       return reply.code(404).send({
@@ -54,6 +66,7 @@ const jobRoutes: FastifyPluginAsync = async (app) => {
     if (!body) return reply;
 
     const job = await createJob(app.db, request.dispatcher.id, body);
+    publishJob(app, "job:created", job);
     return reply.code(201).send(job);
   });
 
@@ -77,6 +90,19 @@ const jobRoutes: FastifyPluginAsync = async (app) => {
     return page;
   });
 
+  // Registered before /:id routes; a fixed segment wins over a parameter.
+  app.get("/changes", async (request, reply) => {
+    const query = parseInput(
+      jobChangesQuerySchema,
+      request.query,
+      reply,
+      "query",
+    );
+    if (!query) return reply;
+
+    return listJobChanges(app.db, query);
+  });
+
   app.patch("/:id", async (request, reply) => {
     const params = parseInput(jobParamsSchema, request.params, reply, "job id");
     if (!params) return reply;
@@ -84,6 +110,7 @@ const jobRoutes: FastifyPluginAsync = async (app) => {
     if (!body) return reply;
 
     return sendChangeResult(
+      app,
       reply,
       await changeJob(app.db, request.dispatcher.id, params.id, body),
     );
@@ -96,6 +123,7 @@ const jobRoutes: FastifyPluginAsync = async (app) => {
     if (!body) return reply;
 
     return sendChangeResult(
+      app,
       reply,
       await changeJob(app.db, request.dispatcher.id, params.id, {
         status: "CANCELLED",

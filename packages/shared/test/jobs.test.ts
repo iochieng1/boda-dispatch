@@ -5,6 +5,7 @@ import {
   cancelJobInputSchema,
   createJobInputSchema,
   JOB_STATUSES,
+  jobChangesQuerySchema,
   jobSchema,
   kenyanPhoneSchema,
   listJobsQuerySchema,
@@ -211,5 +212,26 @@ describe("listJobsQuerySchema", () => {
       false,
     );
     expect(listJobsQuerySchema.safeParse({ limit: "101" }).success).toBe(false);
+  });
+});
+
+describe("jobChangesQuerySchema", () => {
+  it("requires an ISO `since` and defaults the page size", () => {
+    const since = "2026-11-25T08:00:00.000Z";
+    expect(jobChangesQuerySchema.parse({ since })).toEqual({
+      since,
+      limit: 50,
+    });
+    expect(jobChangesQuerySchema.safeParse({}).success).toBe(false);
+    expect(
+      jobChangesQuerySchema.safeParse({ since: "yesterday" }).success,
+    ).toBe(false);
+  });
+
+  it("caps the page size like the job list", () => {
+    const since = "2026-11-25T08:00:00.000Z";
+    expect(jobChangesQuerySchema.safeParse({ since, limit: 101 }).success).toBe(
+      false,
+    );
   });
 });

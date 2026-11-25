@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { serverHelloSchema } from "../src/index.js";
+import { jobEventSchema, serverHelloSchema } from "../src/index.js";
 
 describe("serverHelloSchema", () => {
   it("accepts a hello payload", () => {
@@ -13,5 +13,11 @@ describe("serverHelloSchema", () => {
       serverHelloSchema.safeParse({ socketId: "abc", serverTime: "yesterday" })
         .success,
     ).toBe(false);
+  });
+});
+
+describe("jobEventSchema", () => {
+  it("rejects a payload without a job", () => {
+    expect(jobEventSchema.safeParse({}).success).toBe(false);
   });
 });

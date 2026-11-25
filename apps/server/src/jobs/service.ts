@@ -3,13 +3,15 @@ import {
   type CreateJobInput,
   isTerminalStatus,
   type Job,
+  type JobChangesPage,
+  type JobChangesQuery,
   type JobEventType,
   type JobPage,
   type ListJobsQuery,
   type Location,
   type UpdateJobInput,
 } from "@boda-dispatch/shared";
-import { and, desc, eq, sql } from "drizzle-orm";
+import { and, asc, desc, eq, sql } from "drizzle-orm";
 
 import type { Database } from "../db/client.js";
 import { jobEvents, jobs, riders } from "../db/schema.js";
@@ -134,8 +136,51 @@ export const listJobs = async (
   };
 };
 
+/**
+ * Jobs touched at or after `since`, oldest change first, keyset-paginated. The
+ * cursor is the last job's own (updated_at, id) as a microsecond-precision
+ * string, not a job id: if that job were edited between two page fetches, a
+ * cursor that looked its position up again would jump past every job changed
+ * in between. A job edited mid-scan simply reappears later in the scan.
+ * `since` has millisecond precision while updated_at has microseconds, so a
+ * job changed within the same millisecond is returned again rather than
+ * missed; clients dedupe by version.
+ */
+const UPDATED_AT_TEXT = sql<string>`to_char(${jobs.updatedAt} at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`;
+
+export const listJobChanges = async (
+  db: Database,
+  { since, cursor, limit }: JobChangesQuery,
+): Promise<JobChangesPage> => {
+  const [cursorTime, cursorId] = cursor ? cursor.split("_") : [];
+
+  const rows = await db
+    .select({ job: jobs, updatedAtText: UPDATED_AT_TEXT })
+    .from(jobs)
+    .where(
+      and(
+        sql`${jobs.updatedAt} >= ${since}::timestamptz`,
+        cursor
+          ? sql`(${jobs.updatedAt}, ${jobs.id}) > (${cursorTime}::timestamptz, ${cursorId}::uuid)`
+          : undefined,
+      ),
+    )
+    .orderBy(asc(jobs.updatedAt), asc(jobs.id))
+    .limit(limit + 1);
+
+  const page = rows.slice(0, limit);
+  const last = page[page.length - 1];
+  return {
+    jobs: page.map((row) => toJob(row.job)),
+    nextCursor:
+      rows.length > limit && last
+        ? `${last.updatedAtText}_${last.job.id}`
+        : null,
+  };
+};
+
 export type ChangeJobResult =
-  | { kind: "ok"; job: Job }
+  | { kind: "ok"; job: Job; changed: boolean }
   | { kind: "not_found" }
   /** The rider in the request doesn't exist. */
   | { kind: "rider_not_found" }
@@ -235,7 +280,7 @@ export const changeJob = async (
 
     // Nothing differs: don't bump the version or pad the audit trail.
     if (Object.keys(set).length === 0) {
-      return { kind: "ok", job: toJob(current) };
+      return { kind: "ok", job: toJob(current), changed: false };
     }
 
     const [updated] = await tx
@@ -266,5 +311,5 @@ export const changeJob = async (
       });
     }
 
-    return { kind: "ok", job: toJob(updated!) };
+    return { kind: "ok", job: toJob(updated!), changed: true };
   });
