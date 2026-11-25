@@ -89,10 +89,10 @@ const getAll = async (
   const jobs: Job[] = [];
   let cursor: string | null = null;
   do {
-    const page: JobPage | JobChangesPage = await getPage(path, {
-      ...params,
-      ...(cursor ? { cursor } : {}),
-    });
+    const query: Record<string, string> = cursor
+      ? { ...params, cursor }
+      : params;
+    const page: JobPage | JobChangesPage = await getPage(path, query);
     jobs.push(...page.jobs);
     cursor = page.nextCursor;
   } while (cursor && jobs.length < max);
