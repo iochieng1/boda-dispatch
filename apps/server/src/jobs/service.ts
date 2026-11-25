@@ -3,13 +3,14 @@ import {
   type CreateJobInput,
   isTerminalStatus,
   type Job,
+  type JobChangesQuery,
   type JobEventType,
   type JobPage,
   type ListJobsQuery,
   type Location,
   type UpdateJobInput,
 } from "@boda-dispatch/shared";
-import { and, desc, eq, sql } from "drizzle-orm";
+import { and, asc, desc, eq, sql } from "drizzle-orm";
 
 import type { Database } from "../db/client.js";
 import { jobEvents, jobs, riders } from "../db/schema.js";
@@ -134,8 +135,50 @@ export const listJobs = async (
   };
 };
 
+/**
+ * Jobs touched at or after `since`, oldest change first, keyset-paginated with
+ * the last job's id as the cursor (same technique as listJobs). `since` has
+ * millisecond precision while updated_at has microseconds, so a job changed
+ * within the same millisecond is returned again rather than missed; clients
+ * dedupe by version. A job edited again mid-scan moves to the end of the scan
+ * and is picked up by a later page. Returns undefined for an unknown cursor.
+ */
+export const listJobChanges = async (
+  db: Database,
+  { since, cursor, limit }: JobChangesQuery,
+): Promise<JobPage | undefined> => {
+  if (cursor) {
+    const [found] = await db
+      .select({ id: jobs.id })
+      .from(jobs)
+      .where(eq(jobs.id, cursor))
+      .limit(1);
+    if (!found) return undefined;
+  }
+
+  const rows = await db
+    .select()
+    .from(jobs)
+    .where(
+      and(
+        sql`${jobs.updatedAt} >= ${since}::timestamptz`,
+        cursor
+          ? sql`(${jobs.updatedAt}, ${jobs.id}) > (select j.updated_at, j.id from jobs j where j.id = ${cursor})`
+          : undefined,
+      ),
+    )
+    .orderBy(asc(jobs.updatedAt), asc(jobs.id))
+    .limit(limit + 1);
+
+  const page = rows.slice(0, limit);
+  return {
+    jobs: page.map(toJob),
+    nextCursor: rows.length > limit ? page[page.length - 1]!.id : null,
+  };
+};
+
 export type ChangeJobResult =
-  | { kind: "ok"; job: Job }
+  | { kind: "ok"; job: Job; changed: boolean }
   | { kind: "not_found" }
   /** The rider in the request doesn't exist. */
   | { kind: "rider_not_found" }
@@ -235,7 +278,7 @@ export const changeJob = async (
 
     // Nothing differs: don't bump the version or pad the audit trail.
     if (Object.keys(set).length === 0) {
-      return { kind: "ok", job: toJob(current) };
+      return { kind: "ok", job: toJob(current), changed: false };
     }
 
     const [updated] = await tx
@@ -266,5 +309,5 @@ export const changeJob = async (
       });
     }
 
-    return { kind: "ok", job: toJob(updated!) };
+    return { kind: "ok", job: toJob(updated!), changed: true };
   });

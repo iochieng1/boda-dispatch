@@ -510,4 +510,65 @@ describe("jobs", () => {
       expect(res.statusCode).toBe(401);
     });
   });
+  describe("GET /v1/jobs/changes", () => {
+    const changes = (query: string) =>
+      app.inject({
+        method: "GET",
+        url: `/v1/jobs/changes?${query}`,
+        headers: auth,
+      });
+
+    it("returns jobs touched since a moment, oldest change first", async () => {
+      const first = await create();
+      const second = await create();
+      const rider = await createRider();
+      const since = new Date().toISOString();
+      await patch(first.id, { status: "ASSIGNED", assignedRiderId: rider });
+      const third = await create();
+
+      const res = await changes(`since=${encodeURIComponent(since)}`);
+
+      expect(res.statusCode).toBe(200);
+      const page = res.json<JobPage>();
+      expect(page.jobs.map((j) => j.id)).toEqual([first.id, third.id]);
+      expect(page.jobs[0]).toMatchObject({ status: "ASSIGNED", version: 2 });
+      expect(page.jobs.map((j) => j.id)).not.toContain(second.id);
+      expect(page.nextCursor).toBeNull();
+    });
+
+    it("pages with a cursor without skipping or repeating a job", async () => {
+      const since = new Date().toISOString();
+      const made = [await create(), await create(), await create()];
+
+      const seen: string[] = [];
+      let cursor: string | null = null;
+      do {
+        const res = await changes(
+          `since=${encodeURIComponent(since)}&limit=2${cursor ? `&cursor=${cursor}` : ""}`,
+        );
+        const page: JobPage = res.json<JobPage>();
+        seen.push(...page.jobs.map((j) => j.id));
+        cursor = page.nextCursor;
+      } while (cursor);
+
+      expect(seen).toEqual(made.map((j) => j.id));
+    });
+
+    it("rejects a missing or malformed since and an unknown cursor", async () => {
+      expect((await changes("")).statusCode).toBe(400);
+      expect((await changes("since=yesterday")).statusCode).toBe(400);
+      const since = encodeURIComponent(new Date().toISOString());
+      expect(
+        (await changes(`since=${since}&cursor=${randomUUID()}`)).statusCode,
+      ).toBe(400);
+    });
+
+    it("requires authentication", async () => {
+      const res = await app.inject({
+        method: "GET",
+        url: `/v1/jobs/changes?since=${encodeURIComponent(new Date().toISOString())}`,
+      });
+      expect(res.statusCode).toBe(401);
+    });
+  });
 });

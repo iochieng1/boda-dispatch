@@ -1,6 +1,7 @@
 import { createAdapter } from "@socket.io/redis-adapter";
 import {
   type ClientToServerEvents,
+  DISPATCH_ROOM,
   type DispatcherProfile,
   type ServerToClientEvents,
   SOCKET_UNAUTHORIZED,
@@ -111,6 +112,9 @@ export const attachSocketServer = (app: FastifyInstance, redis: Redis) => {
     );
 
     scheduleExpiry(socket, socket.data.tokenExpiresAt);
+    // Every authenticated socket is a dispatcher for now; riders will get
+    // rooms of their own.
+    void socket.join(DISPATCH_ROOM);
 
     socket.on("auth:refresh", async (payload, ack) => {
       if (typeof ack !== "function") return;
