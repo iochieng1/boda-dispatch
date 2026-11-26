@@ -2,7 +2,9 @@ import type { Job, JobConflictCode, JobEdit } from "@boda-dispatch/shared";
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  canUseMine,
   MAX_REBASES,
+  type SaveResult,
   saveJobEdit,
   type SendChange,
   type SendResult,
@@ -137,5 +139,39 @@ describe("saveJobEdit", () => {
 
     expect(result.kind).toBe("refused");
     expect(send).toHaveBeenCalledTimes(MAX_REBASES + 1);
+  });
+});
+
+type Conflict = Extract<SaveResult, { kind: "conflict" }>;
+
+describe("canUseMine", () => {
+  const assigned = {
+    ...base,
+    status: "ASSIGNED" as const,
+    assignedRiderId: rider,
+    version: 2,
+  };
+  const conflictWith = (latest: Job, edit: JobEdit): Conflict => ({
+    kind: "conflict",
+    latest,
+    edit,
+    fields: [],
+  });
+
+  it("allows overriding a field edit or a cancel that still applies", () => {
+    expect(
+      canUseMine(conflictWith(assigned, { parcelDescription: "Box" })),
+    ).toBe(true);
+    expect(canUseMine(conflictWith(assigned, { status: "CANCELLED" }))).toBe(
+      true,
+    );
+  });
+
+  it("refuses re-assigning a job someone else already assigned", () => {
+    expect(
+      canUseMine(
+        conflictWith(assigned, { status: "ASSIGNED", assignedRiderId: rider }),
+      ),
+    ).toBe(false);
   });
 });

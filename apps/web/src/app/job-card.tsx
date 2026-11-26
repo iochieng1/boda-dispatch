@@ -8,7 +8,7 @@ import {
 } from "@boda-dispatch/shared";
 import type { FormEvent } from "react";
 
-import { type SaveResult, saveJobEdit } from "@/lib/job-changes";
+import { canUseMine, type SaveResult, saveJobEdit } from "@/lib/job-changes";
 import { sendJobEdit } from "@/lib/jobs";
 
 const FIELD_LABELS: Record<JobEditField, string> = {
@@ -89,13 +89,15 @@ function ConflictPrompt({
         >
           Keep theirs
         </button>
-        <button
-          className="rounded bg-slate-900 px-2 py-1 text-white disabled:opacity-60"
-          disabled={pending}
-          onClick={onUseMine}
-        >
-          Use mine
-        </button>
+        {canUseMine(conflict) && (
+          <button
+            className="rounded bg-slate-900 px-2 py-1 text-white disabled:opacity-60"
+            disabled={pending}
+            onClick={onUseMine}
+          >
+            Use mine
+          </button>
+        )}
       </div>
     </div>
   );
@@ -119,6 +121,9 @@ export function JobCard({
   onChanged: (job: Job) => void;
 }) {
   const { editing, pending, error, conflict } = state;
+  // While a conflict is open, the prompt decides; the form is frozen so
+  // "use mine" sends exactly what the dispatcher sees.
+  const locked = pending || conflict !== null;
 
   const save = async (base: Job, edit: JobEdit) => {
     update({ pending: true, error: null, conflict: null });
@@ -133,7 +138,12 @@ export function JobCard({
         case "conflict":
           return update({ pending: false, conflict: result });
         case "refused":
-          return update({ ...idleCard, error: result.message });
+          // Keep the draft, now based on the job as it is, to fix and retry.
+          return update({
+            pending: false,
+            error: result.message,
+            editing: editing && { ...editing, base: result.latest },
+          });
       }
     } catch (err) {
       update({
@@ -164,13 +174,13 @@ export function JobCard({
             onChange={(e) =>
               update({ editing: { ...editing, draft: e.target.value } })
             }
-            disabled={pending}
+            disabled={locked}
             autoFocus
           />
           <button
             type="submit"
             className="rounded bg-slate-900 px-2 py-1 text-white disabled:opacity-60"
-            disabled={pending}
+            disabled={locked}
           >
             Save
           </button>
@@ -191,7 +201,8 @@ export function JobCard({
       {open && !editing && (
         <div className="mt-2 flex gap-3 text-xs">
           <button
-            className="underline"
+            className="underline disabled:opacity-60"
+            disabled={locked}
             onClick={() =>
               update({
                 error: null,
@@ -203,7 +214,7 @@ export function JobCard({
           </button>
           <button
             className="text-red-700 underline disabled:opacity-60"
-            disabled={pending}
+            disabled={locked}
             onClick={() => void save(job, { status: "CANCELLED" })}
           >
             Cancel job

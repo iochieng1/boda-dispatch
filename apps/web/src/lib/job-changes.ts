@@ -1,4 +1,5 @@
 import {
+  canTransition,
   type Job,
   type JobConflict,
   type JobEdit,
@@ -70,3 +71,15 @@ export const saveJobEdit = async (
     }
   }
 };
+
+/**
+ * Whether "use mine" can work: applying the dispatcher's edit over the latest
+ * job must still be a move the server accepts. When both sides assigned the
+ * job, it is already ASSIGNED and can't be assigned again, so only "keep
+ * theirs" makes sense.
+ */
+export const canUseMine = ({
+  latest,
+  edit,
+}: Extract<SaveResult, { kind: "conflict" }>): boolean =>
+  edit.status === undefined || canTransition(latest.status, edit.status);

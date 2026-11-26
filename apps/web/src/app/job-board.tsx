@@ -41,10 +41,15 @@ export function JobBoard() {
   const [cards, setCards] = useState<Record<string, CardState>>({});
   const updateCard = useCallback(
     (id: string, change: Partial<CardState>) =>
-      setCards((all) => ({
-        ...all,
-        [id]: { ...(all[id] ?? idleCard), ...change },
-      })),
+      setCards((all) => {
+        const { [id]: held = idleCard, ...rest } = all;
+        const next = { ...held, ...change };
+        // Idle cards aren't stored, so the map only holds cards in use.
+        const idle = (Object.keys(idleCard) as (keyof CardState)[]).every(
+          (key) => next[key] === idleCard[key],
+        );
+        return idle ? rest : { ...rest, [id]: next };
+      }),
     [],
   );
 
