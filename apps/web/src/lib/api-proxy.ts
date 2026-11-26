@@ -10,7 +10,7 @@ import { callApi, errorJson } from "@/lib/auth-server";
 export const forwardToApi = async (
   request: NextRequest,
   path: string,
-  init: { method: "GET" | "POST"; body?: string },
+  init: { method: "GET" | "POST" | "PATCH"; body?: string },
 ) => {
   const authorization = request.headers.get("authorization");
   if (!authorization) return errorJson(401, "Not signed in");
