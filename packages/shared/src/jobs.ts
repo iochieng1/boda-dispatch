@@ -62,6 +62,9 @@ export const jobSchema = z.object({
 });
 export type Job = z.infer<typeof jobSchema>;
 
+/** The `version` of the job a change was made against. */
+export const baseVersionSchema = z.number().int().positive();
+
 /**
  * Every client mutation carries a client-generated id so that a mutation queued
  * offline and replayed (possibly more than once) is applied exactly once, and
@@ -69,7 +72,7 @@ export type Job = z.infer<typeof jobSchema>;
  */
 export const mutationEnvelopeSchema = z.object({
   clientMutationId: z.uuid(),
-  baseVersion: z.number().int().positive(),
+  baseVersion: baseVersionSchema,
 });
 export type MutationEnvelope = z.infer<typeof mutationEnvelopeSchema>;
 
@@ -94,21 +97,30 @@ export const isTerminalStatus = (status: JobStatus): boolean =>
   JOB_TRANSITIONS[status].length === 0;
 
 /**
+ * The fields of a job a dispatcher can change. Assigning needs a rider, and a
+ * rider only makes sense when assigning.
+ */
+const jobEditShape = {
+  pickup: locationSchema.optional(),
+  dropoff: locationSchema.optional(),
+  parcelDescription: z.string().trim().min(1).max(500).optional(),
+  status: jobStatusSchema.optional(),
+  assignedRiderId: z.uuid().optional(),
+};
+export type JobEdit = z.infer<z.ZodObject<typeof jobEditShape>>;
+
+/**
  * PATCH /v1/jobs/:id. Edit the addresses or parcel, move the job to its next
- * status, or both. Assigning needs a rider, and a rider only makes sense when
- * assigning.
+ * status, or both. `baseVersion` is the `version` of the job the change was
+ * made against: if the job has moved on since, the server answers 409 with
+ * the current job instead of overwriting someone else's change.
  */
 export const updateJobInputSchema = z
-  .object({
-    pickup: locationSchema.optional(),
-    dropoff: locationSchema.optional(),
-    parcelDescription: z.string().trim().min(1).max(500).optional(),
-    status: jobStatusSchema.optional(),
-    assignedRiderId: z.uuid().optional(),
-  })
+  .object({ ...jobEditShape, baseVersion: baseVersionSchema })
   .strict()
   .superRefine((input, ctx) => {
-    if (Object.values(input).every((value) => value === undefined)) {
+    const { pickup, dropoff, parcelDescription, status } = input;
+    if ([pickup, dropoff, parcelDescription, status].every((v) => !v)) {
       ctx.addIssue({ code: "custom", message: "Nothing to update" });
     }
     if (input.status === "ASSIGNED" && !input.assignedRiderId) {
@@ -129,9 +141,39 @@ export const updateJobInputSchema = z
 export type UpdateJobInput = z.infer<typeof updateJobInputSchema>;
 
 export const cancelJobInputSchema = z
-  .object({ reason: z.string().trim().min(1).max(500).optional() })
+  .object({
+    baseVersion: baseVersionSchema,
+    reason: z.string().trim().min(1).max(500).optional(),
+  })
   .strict();
 export type CancelJobInput = z.infer<typeof cancelJobInputSchema>;
+
+/**
+ * Why a change was refused with 409. Every 409 carries the job as it is now.
+ *
+ * - VERSION_CONFLICT: the job changed since `baseVersion`. Rebase and retry.
+ * - JOB_CLOSED: the job is DELIVERED or CANCELLED and can no longer change.
+ * - INVALID_TRANSITION: the job can't move to the requested status from its
+ *   current one.
+ * - RIDER_BUSY: the rider is already on another job.
+ */
+export const JOB_CONFLICT_CODES = [
+  "VERSION_CONFLICT",
+  "JOB_CLOSED",
+  "INVALID_TRANSITION",
+  "RIDER_BUSY",
+] as const;
+export const jobConflictCodeSchema = z.enum(JOB_CONFLICT_CODES);
+export type JobConflictCode = z.infer<typeof jobConflictCodeSchema>;
+
+export const jobConflictSchema = z.object({
+  statusCode: z.literal(409),
+  error: z.literal("Conflict"),
+  code: jobConflictCodeSchema,
+  message: z.string(),
+  job: jobSchema,
+});
+export type JobConflict = z.infer<typeof jobConflictSchema>;
 
 export const JOBS_PAGE_SIZE_DEFAULT = 50;
 export const JOBS_PAGE_SIZE_MAX = 100;

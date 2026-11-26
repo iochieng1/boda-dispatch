@@ -16,6 +16,7 @@ import {
 } from "@/lib/job-board";
 import { fetchJobChanges, fetchRecentJobs } from "@/lib/jobs";
 
+import { type CardState, idleCard, JobCard } from "./job-card";
 import { useConnection } from "./socket-provider";
 
 const COLUMN_TITLES: Record<JobStatus, string> = {
@@ -25,16 +26,6 @@ const COLUMN_TITLES: Record<JobStatus, string> = {
   DELIVERED: "Delivered",
   CANCELLED: "Cancelled",
 };
-
-function JobCard({ job }: { job: Job }) {
-  return (
-    <li className="rounded border border-slate-200 bg-white p-3 text-sm shadow-sm">
-      <p className="font-medium">{job.parcelDescription}</p>
-      <p className="mt-1 text-slate-600">{job.pickup.address}</p>
-      <p className="text-slate-600">→ {job.dropoff.address}</p>
-    </li>
-  );
-}
 
 /**
  * The live board. Jobs load once over HTTP, then stay current from socket
@@ -47,6 +38,20 @@ export function JobBoard() {
   const [error, setError] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
   const boardRef = useRef(board);
+  const [cards, setCards] = useState<Record<string, CardState>>({});
+  const updateCard = useCallback(
+    (id: string, change: Partial<CardState>) =>
+      setCards((all) => {
+        const { [id]: held = idleCard, ...rest } = all;
+        const next = { ...held, ...change };
+        // Idle cards aren't stored, so the map only holds cards in use.
+        const idle = (Object.keys(idleCard) as (keyof CardState)[]).every(
+          (key) => next[key] === idleCard[key],
+        );
+        return idle ? rest : { ...rest, [id]: next };
+      }),
+    [],
+  );
 
   const apply = useCallback((jobs: Job[]) => {
     boardRef.current = applyJobs(boardRef.current, jobs);
@@ -128,7 +133,13 @@ export function JobBoard() {
               </h2>
               <ul className="space-y-2">
                 {columns[status].map((job) => (
-                  <JobCard key={job.id} job={job} />
+                  <JobCard
+                    key={job.id}
+                    job={job}
+                    state={cards[job.id] ?? idleCard}
+                    update={(change) => updateCard(job.id, change)}
+                    onChanged={(changed) => apply([changed])}
+                  />
                 ))}
               </ul>
             </div>

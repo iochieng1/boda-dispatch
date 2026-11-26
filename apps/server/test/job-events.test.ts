@@ -124,19 +124,19 @@ describe("live job events", () => {
     await bridged(onB);
     const [rider] = await a.db
       .insert(riders)
-      .values({ name: "Otieno", phone: "254712345678" })
-      .onConflictDoUpdate({
-        target: riders.phone,
-        set: { name: "Otieno" },
+      .values({
+        name: "Otieno",
+        phone: `2547${Math.floor(10_000_000 + Math.random() * 89_999_999)}`,
       })
       .returning({ id: riders.id });
     const job = (await request("POST", "/v1/jobs", newJob)).json<Job>();
 
     await request("PATCH", `/v1/jobs/${job.id}`, {
+      baseVersion: 1,
       status: "ASSIGNED",
       assignedRiderId: rider!.id,
     });
-    await request("POST", `/v1/jobs/${job.id}/cancel`, {});
+    await request("POST", `/v1/jobs/${job.id}/cancel`, { baseVersion: 2 });
 
     await expect
       .poll(() => onB.eventsFor(job.id).length, { timeout: 5_000 })
@@ -160,17 +160,26 @@ describe("live job events", () => {
     const job = (await request("POST", "/v1/jobs", newJob)).json<Job>();
     await expect.poll(() => onA.eventsFor(job.id).length).toBe(1);
 
-    // Same description: no change. Delivered job can't be cancelled: 409.
+    // Same description: no change. CREATED can't jump to DELIVERED, and a
+    // stale version is refused: both 409.
     const same = await request("PATCH", `/v1/jobs/${job.id}`, {
+      baseVersion: 1,
       parcelDescription: job.parcelDescription,
     });
     const invalid = await request("PATCH", `/v1/jobs/${job.id}`, {
+      baseVersion: 1,
       status: "DELIVERED",
+    });
+    const stale = await request("PATCH", `/v1/jobs/${job.id}`, {
+      baseVersion: 5,
+      parcelDescription: "Stale",
     });
     expect(same.statusCode).toBe(200);
     expect(invalid.statusCode).toBe(409);
+    expect(stale.statusCode).toBe(409);
     // A later event proves the earlier requests were already processed.
     await request("PATCH", `/v1/jobs/${job.id}`, {
+      baseVersion: 1,
       parcelDescription: "Something else",
     });
 

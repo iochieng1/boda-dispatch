@@ -3,6 +3,7 @@ import {
   createJobInputSchema,
   jobChangesQuerySchema,
   listJobsQuerySchema,
+  type JobConflict,
   updateJobInputSchema,
 } from "@boda-dispatch/shared";
 import type {
@@ -52,9 +53,10 @@ const sendChangeResult = (
       return reply.code(409).send({
         statusCode: 409,
         error: "Conflict",
+        code: result.code,
         message: result.message,
         job: result.job,
-      });
+      } satisfies JobConflict);
   }
 };
 
