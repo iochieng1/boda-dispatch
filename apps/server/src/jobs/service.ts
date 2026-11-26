@@ -5,13 +5,14 @@ import {
   type Job,
   type JobChangesPage,
   type JobChangesQuery,
+  type JobConflictCode,
   type JobEventType,
   type JobPage,
   type ListJobsQuery,
   type Location,
   type UpdateJobInput,
 } from "@boda-dispatch/shared";
-import { and, asc, desc, eq, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, ne, sql } from "drizzle-orm";
 
 import type { Database } from "../db/client.js";
 import { jobEvents, jobs, riders } from "../db/schema.js";
@@ -185,7 +186,10 @@ export type ChangeJobResult =
   /** The rider in the request doesn't exist. */
   | { kind: "rider_not_found" }
   /** The job's current state doesn't allow the change. */
-  | { kind: "conflict"; message: string; job: Job };
+  | { kind: "conflict"; code: JobConflictCode; message: string; job: Job };
+
+/** Statuses in which a job is in a rider's hands. */
+const ACTIVE_STATUSES = ["ASSIGNED", "PICKED_UP"] as const;
 
 const sameLocation = (a: Location, b: Location) =>
   a.address === b.address && a.lat === b.lat && a.lng === b.lng;
@@ -195,10 +199,17 @@ const locationOf = (row: JobRow, which: "pickup" | "dropoff"): Location =>
 
 /**
  * Edits a job and/or moves it to its next status, then appends what happened
- * to the audit trail, all in one transaction. The row is locked first
- * (SELECT ... FOR UPDATE), so two requests racing on one job run one after the
- * other and the second is checked against the first one's result: a job can't
- * be assigned twice or cancelled after it was delivered.
+ * to the audit trail, all in one transaction.
+ *
+ * Optimistic concurrency: the change names the `version` it was made against
+ * (`baseVersion`). If the job has moved on since, nothing is written and the
+ * caller gets a VERSION_CONFLICT with the job as it is now, to rebase onto.
+ * The row is locked first (SELECT ... FOR UPDATE) so that check and the write
+ * see the same row, and the UPDATE itself is a compare-and-swap on version as
+ * well, so a write can never land on a version it wasn't checked against.
+ *
+ * Assigning locks the rider too, so two jobs racing for one rider can't both
+ * win: a rider who is BUSY or already holds an open job is refused.
  */
 export const changeJob = async (
   db: Database,
@@ -214,28 +225,62 @@ export const changeJob = async (
       .for("update");
     if (!current) return { kind: "not_found" };
 
-    const conflict = (message: string): ChangeJobResult => ({
+    const conflict = (
+      code: JobConflictCode,
+      message: string,
+    ): ChangeJobResult => ({
       kind: "conflict",
+      code,
       message,
       job: toJob(current),
     });
 
+    // A closed job can't change whatever version the client saw, and saying
+    // so spares it a rebase that could only fail again.
     if (isTerminalStatus(current.status)) {
-      return conflict(`Job is ${current.status} and can no longer change`);
+      return conflict(
+        "JOB_CLOSED",
+        `Job is ${current.status} and can no longer change`,
+      );
+    }
+
+    if (current.version !== input.baseVersion) {
+      return conflict(
+        "VERSION_CONFLICT",
+        `Job has changed since version ${input.baseVersion}; it is now at version ${current.version}`,
+      );
     }
 
     const { status, assignedRiderId } = input;
     if (status && !canTransition(current.status, status)) {
-      return conflict(`Cannot move a job from ${current.status} to ${status}`);
+      return conflict(
+        "INVALID_TRANSITION",
+        `Cannot move a job from ${current.status} to ${status}`,
+      );
     }
 
     if (assignedRiderId) {
       const [rider] = await tx
-        .select({ id: riders.id })
+        .select({ id: riders.id, status: riders.status })
         .from(riders)
         .where(eq(riders.id, assignedRiderId))
-        .limit(1);
+        .for("update");
       if (!rider) return { kind: "rider_not_found" };
+
+      const [otherJob] = await tx
+        .select({ id: jobs.id })
+        .from(jobs)
+        .where(
+          and(
+            eq(jobs.assignedRiderId, assignedRiderId),
+            inArray(jobs.status, ACTIVE_STATUSES),
+            ne(jobs.id, jobId),
+          ),
+        )
+        .limit(1);
+      if (rider.status === "BUSY" || otherJob) {
+        return conflict("RIDER_BUSY", "Rider is already on another job");
+      }
     }
 
     // Only fields that actually differ are written and recorded.
@@ -286,8 +331,13 @@ export const changeJob = async (
     const [updated] = await tx
       .update(jobs)
       .set({ ...set, version: sql`${jobs.version} + 1`, updatedAt: sql`now()` })
-      .where(eq(jobs.id, jobId))
+      .where(and(eq(jobs.id, jobId), eq(jobs.version, input.baseVersion)))
       .returning();
+    // Unreachable while the row is locked; kept so the write is safe even if
+    // the lock ever goes.
+    if (!updated) {
+      throw new Error(`Job ${jobId} changed under a row lock`);
+    }
 
     if (Object.keys(changes).length > 0) {
       await appendJobEvent(tx, {
@@ -311,5 +361,5 @@ export const changeJob = async (
       });
     }
 
-    return { kind: "ok", job: toJob(updated!), changed: true };
+    return { kind: "ok", job: toJob(updated), changed: true };
   });

@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import type { Job, JobChangesPage, JobPage } from "@boda-dispatch/shared";
 import { asc, eq } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { z } from "zod";
 
 import type { buildApp } from "../src/app.js";
 import { jobEvents, jobs, riders } from "../src/db/schema.js";
@@ -48,30 +49,50 @@ describe("jobs", () => {
   const list = (query = "") =>
     app.inject({ method: "GET", url: `/v1/jobs${query}`, headers: auth });
 
-  const createRider = async () => {
+  const createRider = async (status?: "AVAILABLE" | "BUSY") => {
     const [rider] = await app.db
       .insert(riders)
       .values({
         name: "Otieno",
         phone: `2547${Math.floor(10_000_000 + Math.random() * 89_999_999)}`,
+        ...(status && { status }),
       })
       .returning({ id: riders.id });
     return rider!.id;
   };
 
-  const patch = (id: string, payload: Record<string, unknown>) =>
+  /** The job's version now, or 1 for a job that doesn't exist. */
+  const versionOf = async (id: string) => {
+    if (!z.uuid().safeParse(id).success) return 1;
+    const [row] = await app.db
+      .select({ version: jobs.version })
+      .from(jobs)
+      .where(eq(jobs.id, id));
+    return row?.version ?? 1;
+  };
+
+  /**
+   * Sends a change based on the job's current version, like a client whose
+   * view is up to date, unless the payload names a `baseVersion` itself.
+   */
+  const withVersion = async (id: string, payload: Record<string, unknown>) =>
+    "baseVersion" in payload
+      ? payload
+      : { baseVersion: await versionOf(id), ...payload };
+
+  const patch = async (id: string, payload: Record<string, unknown>) =>
     app.inject({
       method: "PATCH",
       url: `/v1/jobs/${id}`,
-      payload,
+      payload: await withVersion(id, payload),
       headers: auth,
     });
 
-  const cancel = (id: string, payload: Record<string, unknown> = {}) =>
+  const cancel = async (id: string, payload: Record<string, unknown> = {}) =>
     app.inject({
       method: "POST",
       url: `/v1/jobs/${id}/cancel`,
-      payload,
+      payload: await withVersion(id, payload),
       headers: auth,
     });
 
@@ -342,6 +363,7 @@ describe("jobs", () => {
       expect(res.statusCode).toBe(409);
       expect(res.json()).toMatchObject({
         error: "Conflict",
+        code: "INVALID_TRANSITION",
         message: `Cannot move a job from ${from} to ${to}`,
         job: { id: job.id, status: from },
       });
@@ -360,9 +382,10 @@ describe("jobs", () => {
         ]) {
           const res = await patch(job.id, change);
           expect(res.statusCode).toBe(409);
-          expect(res.json().message).toBe(
-            `Job is ${status} and can no longer change`,
-          );
+          expect(res.json()).toMatchObject({
+            code: "JOB_CLOSED",
+            message: `Job is ${status} and can no longer change`,
+          });
         }
         expect(await trail(job.id)).toHaveLength(before.length);
       },
@@ -403,6 +426,14 @@ describe("jobs", () => {
         (await patch("not-a-uuid", { parcelDescription: "x" })).statusCode,
       ).toBe(400);
       expect((await patch(job.id, {})).statusCode).toBe(400);
+      expect(
+        (
+          await patch(job.id, {
+            baseVersion: undefined,
+            parcelDescription: "x",
+          })
+        ).statusCode,
+      ).toBe(400);
       expect((await patch(job.id, { status: "ASSIGNED" })).statusCode).toBe(
         400,
       );
@@ -424,11 +455,24 @@ describe("jobs", () => {
       const [a, b] = [await createRider(), await createRider()];
 
       const results = await Promise.all([
-        patch(job.id, { status: "ASSIGNED", assignedRiderId: a }),
-        patch(job.id, { status: "ASSIGNED", assignedRiderId: b }),
+        patch(job.id, {
+          baseVersion: 1,
+          status: "ASSIGNED",
+          assignedRiderId: a,
+        }),
+        patch(job.id, {
+          baseVersion: 1,
+          status: "ASSIGNED",
+          assignedRiderId: b,
+        }),
       ]);
 
       expect(results.map((r) => r.statusCode).sort()).toEqual([200, 409]);
+      const loser = results.find((r) => r.statusCode === 409)!.json();
+      expect(loser).toMatchObject({
+        code: "VERSION_CONFLICT",
+        job: { id: job.id, status: "ASSIGNED", version: 2 },
+      });
       const events = await trail(job.id);
       expect(
         events.filter((e) => e.type === "JOB_STATUS_CHANGED"),
@@ -437,6 +481,114 @@ describe("jobs", () => {
       const [row] = await app.db.select().from(jobs).where(eq(jobs.id, job.id));
       expect(row!.assignedRiderId).toBe(winner.assignedRiderId);
       expect(row!.version).toBe(2);
+    });
+  });
+
+  describe("optimistic concurrency", () => {
+    it("refuses a change based on an old version and writes nothing", async () => {
+      const job = await create();
+      await patch(job.id, { baseVersion: 1, parcelDescription: "First" });
+      const before = await trail(job.id);
+
+      const res = await patch(job.id, {
+        baseVersion: 1,
+        parcelDescription: "Second",
+      });
+
+      expect(res.statusCode).toBe(409);
+      expect(res.json()).toEqual({
+        statusCode: 409,
+        error: "Conflict",
+        code: "VERSION_CONFLICT",
+        message: "Job has changed since version 1; it is now at version 2",
+        job: expect.objectContaining({
+          parcelDescription: "First",
+          version: 2,
+        }),
+      });
+      expect(await trail(job.id)).toHaveLength(before.length);
+    });
+
+    it("refuses a version from the future", async () => {
+      const job = await create();
+      const res = await patch(job.id, {
+        baseVersion: 7,
+        parcelDescription: "x",
+      });
+      expect(res.json().code).toBe("VERSION_CONFLICT");
+    });
+
+    it("applies a change rebased onto the latest version", async () => {
+      const job = await create();
+      await patch(job.id, { baseVersion: 1, parcelDescription: "Envelope" });
+      const stale = await patch(job.id, { baseVersion: 1, dropoff });
+      const latest = stale.json<{ job: Job }>().job;
+
+      const res = await patch(job.id, {
+        baseVersion: latest.version,
+        dropoff: { ...dropoff, address: "Yaya Centre" },
+      });
+
+      expect(res.statusCode).toBe(200);
+      expect(res.json<Job>()).toMatchObject({
+        parcelDescription: "Envelope",
+        dropoff: { address: "Yaya Centre" },
+        version: 3,
+      });
+    });
+
+    it("refuses a rider marked BUSY", async () => {
+      const job = await create();
+      const res = await patch(job.id, {
+        status: "ASSIGNED",
+        assignedRiderId: await createRider("BUSY"),
+      });
+      expect(res.statusCode).toBe(409);
+      expect(res.json()).toMatchObject({
+        code: "RIDER_BUSY",
+        job: { status: "CREATED", version: 1 },
+      });
+    });
+
+    it("refuses a rider who holds another open job, until it closes", async () => {
+      const riderId = await createRider("AVAILABLE");
+      const first = await create();
+      await patch(first.id, { status: "ASSIGNED", assignedRiderId: riderId });
+      await patch(first.id, { status: "PICKED_UP" });
+
+      const second = await create();
+      const res = await patch(second.id, {
+        status: "ASSIGNED",
+        assignedRiderId: riderId,
+      });
+      expect(res.json().code).toBe("RIDER_BUSY");
+
+      await patch(first.id, { status: "DELIVERED" });
+      const retry = await patch(second.id, {
+        status: "ASSIGNED",
+        assignedRiderId: riderId,
+      });
+      expect(retry.statusCode).toBe(200);
+    });
+
+    it("gives a rider to only one of two jobs assigned at once", async () => {
+      const riderId = await createRider("AVAILABLE");
+      const [a, b] = [await create(), await create()];
+
+      const results = await Promise.all(
+        [a, b].map((job) =>
+          patch(job.id, {
+            baseVersion: 1,
+            status: "ASSIGNED",
+            assignedRiderId: riderId,
+          }),
+        ),
+      );
+
+      expect(results.map((r) => r.statusCode).sort()).toEqual([200, 409]);
+      expect(results.find((r) => r.statusCode === 409)!.json().code).toBe(
+        "RIDER_BUSY",
+      );
     });
   });
 
@@ -470,14 +622,27 @@ describe("jobs", () => {
       expect(res.json<Job>().assignedRiderId).toBe(before.assignedRiderId);
     });
 
-    it("accepts a request with no body", async () => {
+    it("requires the version the cancel was based on", async () => {
       const job = await create();
       const res = await app.inject({
         method: "POST",
         url: `/v1/jobs/${job.id}/cancel`,
         headers: auth,
       });
-      expect(res.statusCode).toBe(200);
+      expect(res.statusCode).toBe(400);
+    });
+
+    it("refuses a cancel based on an old version", async () => {
+      const job = await create();
+      await patch(job.id, { parcelDescription: "Changed meanwhile" });
+
+      const res = await cancel(job.id, { baseVersion: 1 });
+
+      expect(res.statusCode).toBe(409);
+      expect(res.json()).toMatchObject({
+        code: "VERSION_CONFLICT",
+        job: { status: "CREATED", version: 2 },
+      });
     });
 
     it.each(["DELIVERED", "CANCELLED"] as const)(
