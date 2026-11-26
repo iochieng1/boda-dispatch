@@ -6,6 +6,7 @@ import {
   createJobInputSchema,
   JOB_STATUSES,
   jobChangesQuerySchema,
+  jobConflictSchema,
   jobSchema,
   kenyanPhoneSchema,
   listJobsQuerySchema,
@@ -56,19 +57,21 @@ describe("createJobInputSchema", () => {
   });
 });
 
+const validJob = {
+  id: "0b9f3a52-4c1e-4f7a-9a43-6a3b2f1c9d10",
+  pickup: location,
+  dropoff: location,
+  parcelDescription: "Box",
+  status: "CREATED",
+  assignedRiderId: null,
+  version: 1,
+  createdBy: "6f1c2d3e-4b5a-4c6d-8e7f-9a0b1c2d3e4f",
+  createdAt: "2026-11-06T09:00:00.000Z",
+  updatedAt: "2026-11-06T09:00:00.000Z",
+};
+
 describe("jobSchema", () => {
-  const job = {
-    id: "0b9f3a52-4c1e-4f7a-9a43-6a3b2f1c9d10",
-    pickup: location,
-    dropoff: location,
-    parcelDescription: "Box",
-    status: "CREATED",
-    assignedRiderId: null,
-    version: 1,
-    createdBy: "6f1c2d3e-4b5a-4c6d-8e7f-9a0b1c2d3e4f",
-    createdAt: "2026-11-06T09:00:00.000Z",
-    updatedAt: "2026-11-06T09:00:00.000Z",
-  };
+  const job = validJob;
 
   it("accepts a valid job", () => {
     expect(jobSchema.parse(job)).toEqual(job);
@@ -142,28 +145,44 @@ describe("canTransition", () => {
 
 describe("updateJobInputSchema", () => {
   const riderId = "6f1c2d3e-4b5a-4c6d-8e7f-9a0b1c2d3e4f";
+  const v = { baseVersion: 3 };
 
   it("accepts an edit of the parcel on its own", () => {
     expect(
-      updateJobInputSchema.parse({ parcelDescription: " Laptop " }),
-    ).toEqual({ parcelDescription: "Laptop" });
+      updateJobInputSchema.parse({ ...v, parcelDescription: " Laptop " }),
+    ).toEqual({ ...v, parcelDescription: "Laptop" });
   });
 
   it("accepts an assignment with a rider", () => {
     expect(
       updateJobInputSchema.safeParse({
+        ...v,
         status: "ASSIGNED",
         assignedRiderId: riderId,
       }).success,
     ).toBe(true);
   });
 
-  it("rejects an empty update", () => {
-    expect(updateJobInputSchema.safeParse({}).success).toBe(false);
+  it("requires the version the change was based on", () => {
+    const result = updateJobInputSchema.safeParse({ parcelDescription: "x" });
+    expect(result.error?.issues.map((i) => i.path.join("."))).toEqual([
+      "baseVersion",
+    ]);
+    expect(
+      updateJobInputSchema.safeParse({ baseVersion: 0, parcelDescription: "x" })
+        .success,
+    ).toBe(false);
+  });
+
+  it("rejects an update with nothing but a version", () => {
+    const result = updateJobInputSchema.safeParse(v);
+    expect(result.error?.issues.map((i) => i.message)).toEqual([
+      "Nothing to update",
+    ]);
   });
 
   it("rejects assigning without a rider", () => {
-    const result = updateJobInputSchema.safeParse({ status: "ASSIGNED" });
+    const result = updateJobInputSchema.safeParse({ ...v, status: "ASSIGNED" });
     expect(result.error?.issues.map((i) => i.path.join("."))).toEqual([
       "assignedRiderId",
     ]);
@@ -171,10 +190,12 @@ describe("updateJobInputSchema", () => {
 
   it("rejects a rider without the ASSIGNED status", () => {
     expect(
-      updateJobInputSchema.safeParse({ assignedRiderId: riderId }).success,
+      updateJobInputSchema.safeParse({ ...v, assignedRiderId: riderId })
+        .success,
     ).toBe(false);
     expect(
       updateJobInputSchema.safeParse({
+        ...v,
         status: "PICKED_UP",
         assignedRiderId: riderId,
       }).success,
@@ -183,17 +204,42 @@ describe("updateJobInputSchema", () => {
 
   it("rejects fields a dispatcher may not set", () => {
     expect(
-      updateJobInputSchema.safeParse({ version: 9, parcelDescription: "x" })
-        .success,
+      updateJobInputSchema.safeParse({
+        ...v,
+        version: 9,
+        parcelDescription: "x",
+      }).success,
     ).toBe(false);
   });
 });
 
 describe("cancelJobInputSchema", () => {
-  it("makes the reason optional", () => {
-    expect(cancelJobInputSchema.parse({})).toEqual({});
-    expect(cancelJobInputSchema.parse({ reason: " Customer called " })).toEqual(
-      { reason: "Customer called" },
+  it("requires the version and makes the reason optional", () => {
+    expect(cancelJobInputSchema.parse({ baseVersion: 2 })).toEqual({
+      baseVersion: 2,
+    });
+    expect(
+      cancelJobInputSchema.parse({
+        baseVersion: 2,
+        reason: " Customer called ",
+      }),
+    ).toEqual({ baseVersion: 2, reason: "Customer called" });
+    expect(cancelJobInputSchema.safeParse({}).success).toBe(false);
+  });
+});
+
+describe("jobConflictSchema", () => {
+  it("parses a 409 body and rejects an unknown code", () => {
+    const body = {
+      statusCode: 409,
+      error: "Conflict",
+      code: "VERSION_CONFLICT",
+      message: "Job has changed",
+      job: validJob,
+    };
+    expect(jobConflictSchema.parse(body)).toEqual(body);
+    expect(jobConflictSchema.safeParse({ ...body, code: "OOPS" }).success).toBe(
+      false,
     );
   });
 });
