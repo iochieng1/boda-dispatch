@@ -51,6 +51,8 @@ export const appendJobEvent = async (
     dispatcherId: string;
     type: JobEventType;
     payload: Record<string, unknown>;
+    /** Marks this event as the record of that client mutation. */
+    clientMutationId?: string | undefined;
   },
 ) => {
   await tx.insert(jobEvents).values({
@@ -59,42 +61,117 @@ export const appendJobEvent = async (
     actorId: event.dispatcherId,
     type: event.type,
     payload: event.payload,
+    clientMutationId: event.clientMutationId ?? null,
   });
 };
 
+const MUTATION_ID_INDEX = "job_events_client_mutation_id_idx";
+
+/**
+ * Whether `err` is a unique violation on job_events.client_mutation_id: the
+ * same mutation was applied by a concurrent request that committed first.
+ * Drizzle wraps driver errors, so the cause chain is searched.
+ */
+const isDuplicateMutation = (err: unknown): boolean => {
+  let current: unknown = err;
+  for (let depth = 0; depth < 5 && current; depth++) {
+    const { code, constraint_name, cause } = current as {
+      code?: unknown;
+      constraint_name?: unknown;
+      cause?: unknown;
+    };
+    if (code === "23505" && constraint_name === MUTATION_ID_INDEX) return true;
+    current = cause;
+  }
+  return false;
+};
+
+/** The event that recorded a client mutation, if it was applied. */
+const findMutation = async (db: Executor, clientMutationId: string) => {
+  const [event] = await db
+    .select({
+      jobId: jobEvents.jobId,
+      actorId: jobEvents.actorId,
+      type: jobEvents.type,
+    })
+    .from(jobEvents)
+    .where(eq(jobEvents.clientMutationId, clientMutationId))
+    .limit(1);
+  return event;
+};
+
+export type CreateJobResult =
+  | { kind: "created"; job: Job }
+  /** The mutation was applied before; nothing was written this time. */
+  | { kind: "replayed"; job: Job }
+  /** The mutation id was already used by a different change. */
+  | { kind: "mutation_id_reused" };
+
+const replayedCreate = async (
+  db: Database,
+  dispatcherId: string,
+  clientMutationId: string,
+): Promise<CreateJobResult | undefined> => {
+  const event = await findMutation(db, clientMutationId);
+  if (!event) return undefined;
+  if (event.type !== "JOB_CREATED" || event.actorId !== dispatcherId) {
+    return { kind: "mutation_id_reused" };
+  }
+  const [row] = await db.select().from(jobs).where(eq(jobs.id, event.jobId));
+  return { kind: "replayed", job: toJob(row!) };
+};
+
+/**
+ * Creates a job. With a `clientMutationId`, a repeat of a create that already
+ * happened returns that job instead of making a second one, even when both
+ * requests race: the loser's event insert hits the unique index, its whole
+ * transaction (the job included) rolls back, and it answers with the winner's
+ * job.
+ */
 export const createJob = async (
   db: Database,
   dispatcherId: string,
-  input: CreateJobInput,
-): Promise<Job> =>
-  db.transaction(async (tx) => {
-    const [row] = await tx
-      .insert(jobs)
-      .values({
-        pickupAddress: input.pickup.address,
-        pickupLat: input.pickup.lat,
-        pickupLng: input.pickup.lng,
-        dropoffAddress: input.dropoff.address,
-        dropoffLat: input.dropoff.lat,
-        dropoffLng: input.dropoff.lng,
-        parcelDescription: input.parcelDescription,
-        createdBy: dispatcherId,
-      })
-      .returning();
+  { clientMutationId, ...input }: CreateJobInput,
+): Promise<CreateJobResult> => {
+  if (clientMutationId) {
+    const replay = await replayedCreate(db, dispatcherId, clientMutationId);
+    if (replay) return replay;
+  }
 
-    await appendJobEvent(tx, {
-      jobId: row!.id,
-      dispatcherId,
-      type: "JOB_CREATED",
-      payload: {
-        pickup: input.pickup,
-        dropoff: input.dropoff,
-        parcelDescription: input.parcelDescription,
-      },
+  try {
+    return await db.transaction(async (tx): Promise<CreateJobResult> => {
+      const [row] = await tx
+        .insert(jobs)
+        .values({
+          pickupAddress: input.pickup.address,
+          pickupLat: input.pickup.lat,
+          pickupLng: input.pickup.lng,
+          dropoffAddress: input.dropoff.address,
+          dropoffLat: input.dropoff.lat,
+          dropoffLng: input.dropoff.lng,
+          parcelDescription: input.parcelDescription,
+          createdBy: dispatcherId,
+        })
+        .returning();
+
+      await appendJobEvent(tx, {
+        jobId: row!.id,
+        dispatcherId,
+        type: "JOB_CREATED",
+        payload: input,
+        clientMutationId,
+      });
+
+      return { kind: "created", job: toJob(row!) };
     });
-
-    return toJob(row!);
-  });
+  } catch (err) {
+    if (clientMutationId && isDuplicateMutation(err)) {
+      const replay = await replayedCreate(db, dispatcherId, clientMutationId);
+      if (replay) return replay;
+    }
+    throw err;
+  }
+};
 
 /**
  * Newest first, keyset-paginated: the cursor is the id of the last job on the
@@ -181,8 +258,16 @@ export const listJobChanges = async (
 };
 
 export type ChangeJobResult =
-  | { kind: "ok"; job: Job; changed: boolean }
+  | {
+      kind: "ok";
+      job: Job;
+      changed: boolean;
+      /** The mutation was applied before; `job` is how it is now. */
+      replayed?: true;
+    }
   | { kind: "not_found" }
+  /** The mutation id was already used by a different change. */
+  | { kind: "mutation_id_reused" }
   /** The rider in the request doesn't exist. */
   | { kind: "rider_not_found" }
   /** The job's current state doesn't allow the change. */
@@ -201,6 +286,12 @@ const locationOf = (row: JobRow, which: "pickup" | "dropoff"): Location =>
  * Edits a job and/or moves it to its next status, then appends what happened
  * to the audit trail, all in one transaction.
  *
+ * Idempotent replay: with a `clientMutationId`, a change that was already
+ * applied (its event carries that id) is answered with the job as it is now
+ * and writes nothing, whatever has happened to the job since. The check runs
+ * under the job's row lock, so two copies of one mutation racing each other
+ * are serialised and the second sees the first's event.
+ *
  * Optimistic concurrency: the change names the `version` it was made against
  * (`baseVersion`). If the job has moved on since, nothing is written and the
  * caller gets a VERSION_CONFLICT with the job as it is now, to rebase onto.
@@ -216,6 +307,24 @@ export const changeJob = async (
   dispatcherId: string,
   jobId: string,
   input: UpdateJobInput & { reason?: string },
+): Promise<ChangeJobResult> => {
+  try {
+    return await applyChange(db, dispatcherId, jobId, input);
+  } catch (err) {
+    // The id was recorded meanwhile by a change to another job (same-job
+    // replays wait on the row lock instead). Re-running finds that event.
+    if (input.clientMutationId && isDuplicateMutation(err)) {
+      return applyChange(db, dispatcherId, jobId, input);
+    }
+    throw err;
+  }
+};
+
+const applyChange = async (
+  db: Database,
+  dispatcherId: string,
+  jobId: string,
+  input: UpdateJobInput & { reason?: string },
 ): Promise<ChangeJobResult> =>
   db.transaction(async (tx): Promise<ChangeJobResult> => {
     const [current] = await tx
@@ -224,6 +333,20 @@ export const changeJob = async (
       .where(eq(jobs.id, jobId))
       .for("update");
     if (!current) return { kind: "not_found" };
+
+    // Before any other check: a replay of an applied change succeeds even if
+    // the job has moved on or closed since.
+    const { clientMutationId } = input;
+    if (clientMutationId) {
+      const applied = await findMutation(tx, clientMutationId);
+      if (applied) {
+        return applied.jobId === jobId &&
+          applied.actorId === dispatcherId &&
+          applied.type !== "JOB_CREATED"
+          ? { kind: "ok", job: toJob(current), changed: false, replayed: true }
+          : { kind: "mutation_id_reused" };
+      }
+    }
 
     const conflict = (
       code: JobConflictCode,
@@ -323,8 +446,19 @@ export const changeJob = async (
       if (assignedRiderId) set.assignedRiderId = assignedRiderId;
     }
 
-    // Nothing differs: don't bump the version or pad the audit trail.
+    // Nothing differs: don't bump the version. A client mutation is still
+    // recorded (an update with no changes), so that a replay of it is
+    // recognised instead of being judged against a job that moved on since.
     if (Object.keys(set).length === 0) {
+      if (clientMutationId) {
+        await appendJobEvent(tx, {
+          jobId,
+          dispatcherId,
+          type: "JOB_UPDATED",
+          payload: { changes: {} },
+          clientMutationId,
+        });
+      }
       return { kind: "ok", job: toJob(current), changed: false };
     }
 
@@ -339,18 +473,23 @@ export const changeJob = async (
       throw new Error(`Job ${jobId} changed under a row lock`);
     }
 
+    // The mutation id goes on the first event only (the index is unique).
+    let mutationId = clientMutationId;
     if (Object.keys(changes).length > 0) {
       await appendJobEvent(tx, {
         jobId,
         dispatcherId,
         type: "JOB_UPDATED",
         payload: { changes },
+        clientMutationId: mutationId,
       });
+      mutationId = undefined;
     }
     if (status) {
       await appendJobEvent(tx, {
         jobId,
         dispatcherId,
+        clientMutationId: mutationId,
         type: "JOB_STATUS_CHANGED",
         payload: {
           from: current.status,

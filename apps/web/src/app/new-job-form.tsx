@@ -3,7 +3,8 @@
 import { type FormEvent, useRef, useState } from "react";
 
 import { parseJobForm } from "@/lib/job-form";
-import { createJob, JobRequestError } from "@/lib/jobs";
+
+import { useOutbox } from "./outbox-provider";
 
 const inputClass = "mt-1 w-full rounded border border-slate-300 px-3 py-2";
 
@@ -76,10 +77,13 @@ function Place({
 }
 
 export function NewJobForm() {
+  const { enqueueCreate } = useOutbox();
   const formRef = useRef<HTMLFormElement>(null);
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [formError, setFormError] = useState<string | null>(null);
-  const [created, setCreated] = useState<string | null>(null);
+  const [created, setCreated] = useState<
+    { kind: "created"; id: string | null } | { kind: "queued" } | null
+  >(null);
   const [pending, setPending] = useState(false);
 
   const onSubmit = async (event: FormEvent<HTMLFormElement>) => {
@@ -93,11 +97,22 @@ export function NewJobForm() {
 
     setPending(true);
     try {
-      const job = await createJob(parsed.input);
-      setCreated(job.id);
-      formRef.current?.reset();
+      const outcome = await enqueueCreate(parsed.input);
+      switch (outcome.kind) {
+        case "created":
+          setCreated({ kind: "created", id: outcome.job?.id ?? null });
+          formRef.current?.reset();
+          break;
+        case "queued":
+          // Kept in the outbox; it is created when the connection returns.
+          setCreated({ kind: "queued" });
+          formRef.current?.reset();
+          break;
+        case "refused":
+          setErrors(outcome.fieldErrors);
+          setFormError(outcome.message);
+      }
     } catch (err) {
-      if (err instanceof JobRequestError) setErrors(err.fieldErrors);
       setFormError(
         err instanceof Error ? err.message : "Could not create the job",
       );
@@ -129,9 +144,19 @@ export function NewJobForm() {
             {formError}
           </p>
         )}
-        {created && (
+        {created?.kind === "created" && (
           <p role="status" className="text-sm text-emerald-700">
-            Job created: <code>{created}</code>
+            Job created
+            {created.id && (
+              <>
+                : <code>{created.id}</code>
+              </>
+            )}
+          </p>
+        )}
+        {created?.kind === "queued" && (
+          <p role="status" className="text-sm text-amber-700">
+            Saved offline. The job will be created when the connection returns.
           </p>
         )}
         <button

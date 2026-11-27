@@ -5,7 +5,7 @@ import {
   jobEventSchema,
   type JobStatus,
 } from "@boda-dispatch/shared";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
   applyJobs,
@@ -15,8 +15,11 @@ import {
   resyncSince,
 } from "@/lib/job-board";
 import { fetchJobChanges, fetchRecentJobs } from "@/lib/jobs";
+import { jobIdOf, type QueuedMutation, withPendingEdits } from "@/lib/outbox";
 
 import { type CardState, idleCard, JobCard } from "./job-card";
+import { useOutbox } from "./outbox-provider";
+import { PendingChanges } from "./pending-changes";
 import { useConnection } from "./socket-provider";
 
 const COLUMN_TITLES: Record<JobStatus, string> = {
@@ -34,6 +37,7 @@ const COLUMN_TITLES: Record<JobStatus, string> = {
  */
 export function JobBoard() {
   const { socket } = useConnection();
+  const { mutations, subscribe } = useOutbox();
   const [board, setBoard] = useState(emptyBoard);
   const [error, setError] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
@@ -110,7 +114,35 @@ export function JobBoard() {
     };
   }, [socket, apply, sync]);
 
-  const columns = columnsOf(board);
+  // Jobs the server sends back for queued changes land like any other.
+  useEffect(() => subscribe((job) => apply([job])), [subscribe, apply]);
+
+  const byJob = useMemo(() => {
+    const map: Record<string, QueuedMutation[]> = {};
+    for (const mutation of mutations) {
+      const id = jobIdOf(mutation);
+      if (id) (map[id] ??= []).push(mutation);
+    }
+    return map;
+  }, [mutations]);
+
+  // The board shows each job with the dispatcher's waiting changes applied,
+  // so an edit made offline is visible (and a queued cancel moves the card).
+  const shown = useMemo(() => {
+    const jobs = { ...board.jobs };
+    for (const [id, queued] of Object.entries(byJob)) {
+      const job = jobs[id];
+      if (job) jobs[id] = withPendingEdits(job, queued);
+    }
+    return { ...board, jobs };
+  }, [board, byJob]);
+
+  const columns = columnsOf(shown);
+  // Changes with no card to show them on: new jobs, and jobs not loaded.
+  const unplaced = mutations.filter((m) => {
+    const id = jobIdOf(m);
+    return !id || (loaded && !board.jobs[id]);
+  });
 
   return (
     <section className="mt-6" aria-label="Job board">
@@ -122,6 +154,7 @@ export function JobBoard() {
           </button>
         </p>
       )}
+      <PendingChanges mutations={unplaced} />
       {!loaded && !error && <p className="text-slate-500">Loading jobs…</p>}
       {loaded && (
         <div className="grid grid-cols-1 gap-4 md:grid-cols-5">
@@ -136,9 +169,9 @@ export function JobBoard() {
                   <JobCard
                     key={job.id}
                     job={job}
+                    mutations={byJob[job.id] ?? []}
                     state={cards[job.id] ?? idleCard}
                     update={(change) => updateCard(job.id, change)}
-                    onChanged={(changed) => apply([changed])}
                   />
                 ))}
               </ul>
