@@ -446,8 +446,19 @@ const applyChange = async (
       if (assignedRiderId) set.assignedRiderId = assignedRiderId;
     }
 
-    // Nothing differs: don't bump the version or pad the audit trail.
+    // Nothing differs: don't bump the version. A client mutation is still
+    // recorded (an update with no changes), so that a replay of it is
+    // recognised instead of being judged against a job that moved on since.
     if (Object.keys(set).length === 0) {
+      if (clientMutationId) {
+        await appendJobEvent(tx, {
+          jobId,
+          dispatcherId,
+          type: "JOB_UPDATED",
+          payload: { changes: {} },
+          clientMutationId,
+        });
+      }
       return { kind: "ok", job: toJob(current), changed: false };
     }
 

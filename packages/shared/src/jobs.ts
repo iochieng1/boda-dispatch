@@ -71,8 +71,10 @@ export const baseVersionSchema = z.number().int().positive();
  * client that queues mutations offline replays them when it reconnects, and a
  * replay can arrive twice when an ack is lost. The server applies a mutation
  * id once: a repeat gets the original status code and the job as it is now,
- * with an `Idempotent-Replayed: true` header, and changes nothing. Optional,
- * so a client that never retries can leave it out.
+ * with an `Idempotent-Replayed: true` header, and changes nothing. The server
+ * doesn't compare request bodies, so use a new id for every change (an id
+ * reused by another dispatcher or on another job gets 400). Optional, so a
+ * client that never retries can leave it out.
  */
 export const clientMutationIdSchema = z.uuid();
 

@@ -224,6 +224,30 @@ describe("client mutation replay", () => {
       expect(await trail(job.id)).toHaveLength(2);
     });
 
+    it("recognises the replay of a change that was a no-op", async () => {
+      const job = await freshJob();
+      const edit = {
+        parcelDescription: job.parcelDescription,
+        baseVersion: 1,
+        clientMutationId: randomUUID(),
+      };
+      const first = await patch(job.id, edit);
+      expect(first.json<Job>().version).toBe(1);
+
+      // The job moves on; without the record this replay would be a 409.
+      await patch(job.id, { parcelDescription: "Moved on", baseVersion: 1 });
+      const replay = await patch(job.id, edit);
+
+      expect(replay.statusCode).toBe(200);
+      expect(replay.headers[IDEMPOTENT_REPLAYED_HEADER]).toBe("true");
+      const events = await trail(job.id);
+      expect(events[1]).toMatchObject({
+        type: "JOB_UPDATED",
+        payload: { changes: {} },
+        clientMutationId: edit.clientMutationId,
+      });
+    });
+
     it("lets a refused change retry with the same mutation id", async () => {
       const job = await freshJob();
       await patch(job.id, { parcelDescription: "Theirs", baseVersion: 1 });
