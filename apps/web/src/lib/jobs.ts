@@ -25,10 +25,18 @@ type ErrorBody = {
   issues?: { path: string; message: string }[];
 };
 
+const SEND_TIMEOUT_MS = 20_000;
+
+/**
+ * Answers that mean "not now" rather than "no": the proxy's 502 when the API
+ * is unreachable, the API restarting, timeouts and rate limits.
+ */
+const TRANSIENT_STATUSES = new Set([408, 425, 429, 502, 503, 504]);
+
 /**
  * Sends one change to the API through the dashboard's proxy. A request that
- * may not have arrived, or that the API couldn't handle right now (5xx, which
- * includes the proxy's 502 when the API is unreachable), is an OfflineError:
+ * may not have arrived, or that the API couldn't handle right now (see
+ * TRANSIENT_STATUSES), is an OfflineError:
  * the outbox keeps the change and sends it again later, and its
  * clientMutationId stops a second copy from being applied.
  */
@@ -58,6 +66,9 @@ const sendChange = async (
         authorization: `Bearer ${session.accessToken}`,
       },
       body: JSON.stringify(body),
+      // A request stalled on a bad mobile network must not hold the queue
+      // (and its cross-tab lock) forever.
+      signal: AbortSignal.timeout(SEND_TIMEOUT_MS),
     });
   } catch {
     throw new OfflineError();
@@ -67,7 +78,12 @@ const sendChange = async (
     redirectToLogin();
     throw new SignedOutError();
   }
-  if (res.status >= 500) throw new OfflineError();
+  if (TRANSIENT_STATUSES.has(res.status)) throw new OfflineError();
+  if (res.status >= 500) {
+    // The API is up but failed on this change. Retrying it in a loop would
+    // hold every later change back, so it is shown with a "Try again".
+    throw new JobRequestError("The server couldn't save this change");
+  }
   return res;
 };
 

@@ -30,7 +30,8 @@ const LOCK = "boda-dispatch:outbox";
 const CHANNEL = "boda-dispatch:outbox";
 
 export type CreateOutcome =
-  | { kind: "created"; job: Job }
+  /** `job` is null when another tab sent it, so this one never saw it. */
+  | { kind: "created"; job: Job | null }
   /** Offline: the job will be created when the connection returns. */
   | { kind: "queued" }
   | { kind: "refused"; message: string; fieldErrors: Record<string, string> };
@@ -49,6 +50,8 @@ type Outbox = {
   discard(mutation: QueuedMutation): Promise<void>;
   /** After a conflict: applies the change over the job as it is now. */
   applyOverLatest(mutation: QueuedMutation): Promise<void>;
+  /** After a refusal: sends the change again as it is. */
+  retry(mutation: QueuedMutation): Promise<void>;
   /** Called with each job the server sends back for a queued change. */
   subscribe(listener: (job: Job) => void): () => void;
 };
@@ -150,6 +153,17 @@ export function OutboxProvider({ children }: { children: ReactNode }) {
         );
         await changed();
       } while (again.current && result === "done");
+
+      // A create that left the queue without this tab settling it was sent
+      // by another tab: it exists, it isn't waiting.
+      if (waiters.current.size > 0) {
+        const left = new Set((await (await store()).list(id)).map((m) => m.id));
+        for (const [mutationId, resolve] of waiters.current) {
+          if (left.has(mutationId)) continue;
+          resolve({ kind: "created", job: null });
+          waiters.current.delete(mutationId);
+        }
+      }
 
       setReachable(result !== "offline");
       setProblem(null);
@@ -271,9 +285,25 @@ export function OutboxProvider({ children }: { children: ReactNode }) {
     [store, changed, flush],
   );
 
-  const discard = useCallback(
-    async (mutation: QueuedMutation) => {
-      await (await store()).remove(mutation);
+  /**
+   * Replaces a queued change, but only if it is still stored as `mutation`
+   * shows it: a second click on a prompt, or a prompt a replay has moved on
+   * from, must not resurrect a change that was sent or resolved.
+   */
+  const replace = useCallback(
+    async (mutation: QueuedMutation, next: QueuedMutation | null) => {
+      const s = await store();
+      const stored = (await s.list(mutation.dispatcherId)).find(
+        (m) => m.seq === mutation.seq,
+      );
+      if (
+        !stored ||
+        JSON.stringify(stored.state) !== JSON.stringify(mutation.state)
+      ) {
+        return;
+      }
+      if (next) await s.put(next);
+      else await s.remove(mutation);
       await changed();
       // Changes to the same job that waited behind it can go now.
       void flush();
@@ -281,22 +311,29 @@ export function OutboxProvider({ children }: { children: ReactNode }) {
     [store, changed, flush],
   );
 
+  const discard = useCallback(
+    (mutation: QueuedMutation) => replace(mutation, null),
+    [replace],
+  );
+
   const applyOverLatest = useCallback(
     async (mutation: QueuedMutation) => {
       if (mutation.kind !== "edit" || mutation.state.kind !== "conflict") {
         return;
       }
-      await (
-        await store()
-      ).put({
+      await replace(mutation, {
         ...mutation,
         base: mutation.state.latest,
         state: { kind: "pending" },
       });
-      await changed();
-      void flush();
     },
-    [store, changed, flush],
+    [replace],
+  );
+
+  const retry = useCallback(
+    (mutation: QueuedMutation) =>
+      replace(mutation, { ...mutation, state: { kind: "pending" } }),
+    [replace],
   );
 
   const subscribe = useCallback((listener: (job: Job) => void) => {
@@ -313,6 +350,7 @@ export function OutboxProvider({ children }: { children: ReactNode }) {
       enqueueCreate,
       discard,
       applyOverLatest,
+      retry,
       subscribe,
     }),
     [
@@ -323,6 +361,7 @@ export function OutboxProvider({ children }: { children: ReactNode }) {
       enqueueCreate,
       discard,
       applyOverLatest,
+      retry,
       subscribe,
     ],
   );

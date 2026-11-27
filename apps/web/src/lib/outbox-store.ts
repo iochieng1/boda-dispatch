@@ -46,8 +46,12 @@ export class IndexedDbMutationStore implements MutationStore {
     fn: (store: IDBObjectStore) => IDBRequest<T>,
   ): Promise<T> {
     const tx = (await this.db).transaction(STORE, mode);
-    const result = request(fn(tx.objectStore(STORE)));
-    await done(tx);
+    // Awaited together, so a failed write can't leave either rejection
+    // unhandled.
+    const [result] = await Promise.all([
+      request(fn(tx.objectStore(STORE))),
+      done(tx),
+    ]);
     return result;
   }
 

@@ -6,7 +6,7 @@ import {
   type JobEdit,
   type JobEditField,
 } from "@boda-dispatch/shared";
-import type { FormEvent } from "react";
+import { type FormEvent, useState } from "react";
 
 import { canUseMine, type SaveResult } from "@/lib/job-changes";
 import type { QueuedMutation } from "@/lib/outbox";
@@ -44,17 +44,25 @@ type Conflict = Extract<SaveResult, { kind: "conflict" }>;
  */
 export type CardState = {
   editing: { base: Job; draft: string } | null;
+  /** A change is being written to the outbox: one click, one change. */
+  saving: boolean;
   error: string | null;
 };
 
-export const idleCard: CardState = { editing: null, error: null };
+export const idleCard: CardState = {
+  editing: null,
+  saving: false,
+  error: null,
+};
 
 function ConflictPrompt({
   conflict,
+  busy,
   onKeepTheirs,
   onUseMine,
 }: {
   conflict: Conflict;
+  busy: boolean;
   onKeepTheirs: () => void;
   onUseMine: () => void;
 }) {
@@ -77,13 +85,15 @@ function ConflictPrompt({
       <div className="mt-2 flex gap-2">
         <button
           className="rounded border border-slate-300 bg-white px-2 py-1"
+          disabled={busy}
           onClick={onKeepTheirs}
         >
           Keep theirs
         </button>
         {canUseMine(conflict) && (
           <button
-            className="rounded bg-slate-900 px-2 py-1 text-white"
+            className="rounded bg-slate-900 px-2 py-1 text-white disabled:opacity-60"
+            disabled={busy}
             onClick={onUseMine}
           >
             Use mine
@@ -96,19 +106,26 @@ function ConflictPrompt({
 
 /** What went wrong with a queued change, and how to clear it. */
 export function MutationProblem({ mutation }: { mutation: QueuedMutation }) {
-  const { discard, applyOverLatest } = useOutbox();
+  const { discard, applyOverLatest, retry } = useOutbox();
+  const [busy, setBusy] = useState(false);
   const { state } = mutation;
 
+  const act = (action: (m: QueuedMutation) => Promise<void>) => () => {
+    setBusy(true);
+    action(mutation).finally(() => setBusy(false));
+  };
+
+  if (state.kind === "pending") return null;
   if (state.kind === "conflict" && mutation.kind === "edit") {
     return (
       <ConflictPrompt
         conflict={{ ...state, edit: mutation.edit }}
-        onKeepTheirs={() => void discard(mutation)}
-        onUseMine={() => void applyOverLatest(mutation)}
+        busy={busy}
+        onKeepTheirs={act(discard)}
+        onUseMine={act(applyOverLatest)}
       />
     );
   }
-  if (state.kind === "pending") return null;
   return (
     <div role="alert" className="mt-2 text-red-600">
       <p>
@@ -116,9 +133,14 @@ export function MutationProblem({ mutation }: { mutation: QueuedMutation }) {
         {state.kind === "refused" &&
           Object.values(state.fieldErrors ?? {}).map((m) => ` ${m}`)}
       </p>
-      <button className="underline" onClick={() => void discard(mutation)}>
-        Dismiss
-      </button>
+      <div className="flex gap-3">
+        <button className="underline" disabled={busy} onClick={act(retry)}>
+          Try again
+        </button>
+        <button className="underline" disabled={busy} onClick={act(discard)}>
+          Dismiss
+        </button>
+      </div>
     </div>
   );
 }
@@ -143,20 +165,22 @@ export function JobCard({
   update: (change: Partial<CardState>) => void;
 }) {
   const { enqueueEdit } = useOutbox();
-  const { editing, error } = state;
+  const { editing, saving, error } = state;
   const waiting = mutations.filter((m) => m.state.kind === "pending").length;
   // The oldest unresolved change holds this job's later ones back, and new
   // ones wait until the dispatcher has dealt with it.
   const blocker = mutations.find((m) => m.state.kind !== "pending");
-  const locked = blocker !== undefined;
+  const locked = blocker !== undefined || saving;
 
   const queue = async (base: Job, edit: JobEdit) => {
-    update({ error: null });
+    if (saving) return;
+    update({ error: null, saving: true });
     try {
       await enqueueEdit(base, edit);
       update({ ...idleCard });
     } catch (err) {
       update({
+        saving: false,
         error: err instanceof Error ? err.message : "Could not save the job",
       });
     }

@@ -82,7 +82,7 @@ export function NewJobForm() {
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [formError, setFormError] = useState<string | null>(null);
   const [created, setCreated] = useState<
-    { kind: "created"; id: string } | { kind: "queued" } | null
+    { kind: "created"; id: string | null } | { kind: "queued" } | null
   >(null);
   const [pending, setPending] = useState(false);
 
@@ -100,7 +100,7 @@ export function NewJobForm() {
       const outcome = await enqueueCreate(parsed.input);
       switch (outcome.kind) {
         case "created":
-          setCreated({ kind: "created", id: outcome.job.id });
+          setCreated({ kind: "created", id: outcome.job?.id ?? null });
           formRef.current?.reset();
           break;
         case "queued":
@@ -146,7 +146,12 @@ export function NewJobForm() {
         )}
         {created?.kind === "created" && (
           <p role="status" className="text-sm text-emerald-700">
-            Job created: <code>{created.id}</code>
+            Job created
+            {created.id && (
+              <>
+                : <code>{created.id}</code>
+              </>
+            )}
           </p>
         )}
         {created?.kind === "queued" && (
