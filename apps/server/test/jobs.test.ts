@@ -215,6 +215,10 @@ describe("jobs", () => {
         })),
       );
 
+      // Other test files create jobs at the same time, so compare against the
+      // jobs that existed before the walk: each must be seen exactly once.
+      const before = await app.db.select({ id: jobs.id }).from(jobs);
+
       const seen: string[] = [];
       let cursor: string | null = null;
       do {
@@ -225,9 +229,8 @@ describe("jobs", () => {
         cursor = page.nextCursor;
       } while (cursor);
 
-      const all = await app.db.select({ id: jobs.id }).from(jobs);
-      expect(seen).toHaveLength(all.length);
       expect(new Set(seen).size).toBe(seen.length);
+      expect(seen).toEqual(expect.arrayContaining(before.map((j) => j.id)));
     });
 
     it("filters by status", async () => {
