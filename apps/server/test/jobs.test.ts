@@ -155,15 +155,25 @@ describe("jobs", () => {
     });
 
     it("rejects an invalid body with 400 and writes nothing", async () => {
-      const before = await app.db.select().from(jobs);
+      // A unique parcel, since other test files create jobs meanwhile.
+      const parcelDescription = `Invalid ${randomUUID()}`;
 
-      const res = await post({ ...newJob, pickup: { ...pickup, lat: 95 } });
+      const res = await post({
+        ...newJob,
+        parcelDescription,
+        pickup: { ...pickup, lat: 95 },
+      });
 
       expect(res.statusCode).toBe(400);
       expect(res.json().issues).toEqual([
         expect.objectContaining({ path: "pickup.lat" }),
       ]);
-      expect(await app.db.select().from(jobs)).toHaveLength(before.length);
+      expect(
+        await app.db
+          .select()
+          .from(jobs)
+          .where(eq(jobs.parcelDescription, parcelDescription)),
+      ).toHaveLength(0);
     });
 
     it("requires authentication", async () => {
@@ -184,19 +194,23 @@ describe("jobs", () => {
       }
       const newestFirst = mine.map((j) => j.id).reverse();
 
-      const first = (await list("?limit=2")).json<JobPage>();
-      expect(first.jobs.map((j) => j.id)).toEqual(newestFirst.slice(0, 2));
-      expect(first.nextCursor).toBe(newestFirst[1]);
+      // Other test files create jobs meanwhile, so walk every page and
+      // look at where ours land.
+      const seen: string[] = [];
+      let cursor: string | null = null;
+      do {
+        const page: JobPage = (
+          await list(`?limit=2${cursor ? `&cursor=${cursor}` : ""}`)
+        ).json<JobPage>();
+        expect(page.jobs.length).toBeLessThanOrEqual(2);
+        if (page.nextCursor) expect(page.nextCursor).toBe(page.jobs[1]!.id);
+        seen.push(...page.jobs.map((j) => j.id));
+        cursor = page.nextCursor;
+      } while (cursor);
 
-      const second = (
-        await list(`?limit=2&cursor=${first.nextCursor}`)
-      ).json<JobPage>();
-      expect(second.jobs.map((j) => j.id)).toEqual(newestFirst.slice(2, 4));
-
-      const third = (
-        await list(`?limit=2&cursor=${second.nextCursor}`)
-      ).json<JobPage>();
-      expect(third.jobs[0]!.id).toBe(newestFirst[4]);
+      expect(seen.filter((id) => newestFirst.includes(id))).toEqual(
+        newestFirst,
+      );
     });
 
     it("walks every job exactly once, even with identical timestamps", async () => {
