@@ -1,6 +1,7 @@
 import {
   cancelJobInputSchema,
   createJobInputSchema,
+  IDEMPOTENT_REPLAYED_HEADER,
   jobChangesQuerySchema,
   listJobsQuerySchema,
   type JobConflict,
@@ -25,6 +26,19 @@ import { parseInput } from "./validate.js";
 
 const jobParamsSchema = z.object({ id: z.uuid() });
 
+const mutationIdReused = (reply: FastifyReply) =>
+  reply.code(400).send({
+    statusCode: 400,
+    error: "Bad Request",
+    message: "Invalid request body",
+    issues: [
+      {
+        path: "clientMutationId",
+        message: "Already used by a different change",
+      },
+    ],
+  });
+
 const sendChangeResult = (
   app: FastifyInstance,
   reply: FastifyReply,
@@ -32,8 +46,11 @@ const sendChangeResult = (
 ) => {
   switch (result.kind) {
     case "ok":
+      if (result.replayed) reply.header(IDEMPOTENT_REPLAYED_HEADER, "true");
       if (result.changed) publishJob(app, "job:updated", result.job);
       return result.job;
+    case "mutation_id_reused":
+      return mutationIdReused(reply);
     case "not_found":
       return reply.code(404).send({
         statusCode: 404,
@@ -67,9 +84,21 @@ const jobRoutes: FastifyPluginAsync = async (app) => {
     const body = parseInput(createJobInputSchema, request.body, reply);
     if (!body) return reply;
 
-    const job = await createJob(app.db, request.dispatcher.id, body);
-    publishJob(app, "job:created", job);
-    return reply.code(201).send(job);
+    const result = await createJob(app.db, request.dispatcher.id, body);
+    switch (result.kind) {
+      case "created":
+        publishJob(app, "job:created", result.job);
+        return reply.code(201).send(result.job);
+      case "replayed":
+        // Same answer as the first time, so a client that lost the ack can't
+        // tell the difference; nothing new to publish.
+        return reply
+          .code(201)
+          .header(IDEMPOTENT_REPLAYED_HEADER, "true")
+          .send(result.job);
+      case "mutation_id_reused":
+        return mutationIdReused(reply);
+    }
   });
 
   app.get("/", async (request, reply) => {
