@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   canTransition,
   cancelJobInputSchema,
+  clientMutationIdSchema,
   createJobInputSchema,
   JOB_STATUSES,
   jobChangesQuerySchema,
@@ -10,7 +11,6 @@ import {
   jobSchema,
   kenyanPhoneSchema,
   listJobsQuerySchema,
-  mutationEnvelopeSchema,
   updateJobInputSchema,
 } from "../src/index.js";
 
@@ -83,12 +83,40 @@ describe("jobSchema", () => {
   });
 });
 
-describe("mutationEnvelopeSchema", () => {
-  it("requires a UUID client mutation id", () => {
+describe("clientMutationId", () => {
+  const id = "00000000-0000-4000-8000-000000000123";
+
+  it("is optional on a create, an edit and a cancel", () => {
     expect(
-      mutationEnvelopeSchema.safeParse({
-        clientMutationId: "not-a-uuid",
+      updateJobInputSchema.safeParse({ baseVersion: 1, status: "CANCELLED" })
+        .success,
+    ).toBe(true);
+    expect(cancelJobInputSchema.safeParse({ baseVersion: 1 }).success).toBe(
+      true,
+    );
+  });
+
+  it("is accepted as a UUID on every mutation", () => {
+    expect(
+      updateJobInputSchema.safeParse({
         baseVersion: 1,
+        status: "CANCELLED",
+        clientMutationId: id,
+      }).success,
+    ).toBe(true);
+    expect(
+      cancelJobInputSchema.safeParse({ baseVersion: 1, clientMutationId: id })
+        .success,
+    ).toBe(true);
+    expect(clientMutationIdSchema.safeParse(id).success).toBe(true);
+  });
+
+  it("must be a UUID", () => {
+    expect(clientMutationIdSchema.safeParse("not-a-uuid").success).toBe(false);
+    expect(
+      cancelJobInputSchema.safeParse({
+        baseVersion: 1,
+        clientMutationId: "not-a-uuid",
       }).success,
     ).toBe(false);
   });

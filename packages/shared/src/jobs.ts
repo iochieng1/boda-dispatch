@@ -44,6 +44,7 @@ export const createJobInputSchema = z.object({
   pickup: locationSchema,
   dropoff: locationSchema,
   parcelDescription: z.string().trim().min(1).max(500),
+  clientMutationId: z.uuid().optional(),
 });
 export type CreateJobInput = z.infer<typeof createJobInputSchema>;
 
@@ -66,15 +67,17 @@ export type Job = z.infer<typeof jobSchema>;
 export const baseVersionSchema = z.number().int().positive();
 
 /**
- * Every client mutation carries a client-generated id so that a mutation queued
- * offline and replayed (possibly more than once) is applied exactly once, and
- * the version it was based on so the server can reject stale writes.
+ * A client-generated id for one mutation (a create, an edit or a cancel). A
+ * client that queues mutations offline replays them when it reconnects, and a
+ * replay can arrive twice when an ack is lost. The server applies a mutation
+ * id once: a repeat gets the original status code and the job as it is now,
+ * with an `Idempotent-Replayed: true` header, and changes nothing. Optional,
+ * so a client that never retries can leave it out.
  */
-export const mutationEnvelopeSchema = z.object({
-  clientMutationId: z.uuid(),
-  baseVersion: baseVersionSchema,
-});
-export type MutationEnvelope = z.infer<typeof mutationEnvelopeSchema>;
+export const clientMutationIdSchema = z.uuid();
+
+/** Response header set when a request repeated an already-applied mutation. */
+export const IDEMPOTENT_REPLAYED_HEADER = "idempotent-replayed";
 
 /**
  * Where a job may go next. A job moves forward one step at a time and any job
@@ -116,7 +119,11 @@ export type JobEdit = z.infer<z.ZodObject<typeof jobEditShape>>;
  * the current job instead of overwriting someone else's change.
  */
 export const updateJobInputSchema = z
-  .object({ ...jobEditShape, baseVersion: baseVersionSchema })
+  .object({
+    ...jobEditShape,
+    baseVersion: baseVersionSchema,
+    clientMutationId: z.uuid().optional(),
+  })
   .strict()
   .superRefine((input, ctx) => {
     const { pickup, dropoff, parcelDescription, status } = input;
@@ -144,6 +151,7 @@ export const cancelJobInputSchema = z
   .object({
     baseVersion: baseVersionSchema,
     reason: z.string().trim().min(1).max(500).optional(),
+    clientMutationId: z.uuid().optional(),
   })
   .strict();
 export type CancelJobInput = z.infer<typeof cancelJobInputSchema>;
